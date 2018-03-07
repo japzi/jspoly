@@ -1,10 +1,11 @@
 /*
 JSPoly 
-This is a Javascript translation of the Boost Polygon Library written in C++. 
+This is a Javascript translation of the Boost Polygon Library written in C++.
+For 128-bit big integer support this library uses JSBN library from Tom Wu.
 
 Author  : Ruwan J Egodagamage (japzi)
-Version : 0.0.4l
-Date    : 6/22/2017
+Version : 1.0.0a
+Date    : 3/7/2018
 License : Boost Software License - Version 1.0 - August 17th, 2003
 
 Contributors : rodovich, ahinz, gensym, nevernormal1
@@ -41,11 +42,1293 @@ DEALINGS IN THE SOFTWARE.
 
 */
 
+/*
+The jsbn library is a fast, portable implementation of large-number math in pure JavaScript
+
+Copyright (c) 2003-2005  Tom Wu
+All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS-IS" AND WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS, IMPLIED OR OTHERWISE, INCLUDING WITHOUT LIMITATION, ANY 
+WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.  
+
+IN NO EVENT SHALL TOM WU BE LIABLE FOR ANY SPECIAL, INCIDENTAL,
+INDIRECT OR CONSEQUENTIAL DAMAGES OF ANY KIND, OR ANY DAMAGES WHATSOEVER
+RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER OR NOT ADVISED OF
+THE POSSIBILITY OF DAMAGE, AND ON ANY THEORY OF LIABILITY, ARISING OUT
+OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+In addition, the following condition applies:
+
+All redistributions must retain an intact copy of this copyright notice
+and disclaimer.
+*/
+
+var isNode = false;
+if (typeof module !== 'undefined' && module.exports)
+{
+  isNode = true;
+}
+
+var navigatorAppName;
+if (!isNode)
+{
+  var nav = navigator.userAgent.toString().toLowerCase();
+  navigatorAppName = navigator.appName;
+}
+else
+{
+  var nav = "chrome"; // Node.js uses Chrome's V8 engine
+  navigatorAppName = "Netscape"; // Firefox, Chrome and Safari returns "Netscape", so Node.js should also
+}
+
+// Basic JavaScript BN library - subset useful for RSA encryption.
+
+// Bits per digit
+var dbits;
+
+// JavaScript engine analysis
+var canary = 0xdeadbeefcafe;
+var j_lm = ((canary&0xffffff)==0xefcafe);
+
+// (public) Constructor
+function BigInteger(a,b,c) {
+  if(a != null)
+    if("number" == typeof a) this.fromNumber(a,b,c);
+    else if(b == null && "string" != typeof a) this.fromString(a,256);
+    else this.fromString(a,b);
+}
+
+// return new, unset BigInteger
+function nbi() { return new BigInteger(null); }
+
+// am: Compute w_j += (x*this_i), propagate carries,
+// c is initial carry, returns final carry.
+// c < 3*dvalue, x < 2*dvalue, this_i < dvalue
+// We need to select the fastest one that works in this environment.
+
+// am1: use a single mult and divide to get the high bits,
+// max digit bits should be 26 because
+// max internal value = 2*dvalue^2-2*dvalue (< 2^53)
+function am1(i,x,w,j,c,n) {
+  while(--n >= 0) {
+    var v = x*this[i++]+w[j]+c;
+    c = Math.floor(v/0x4000000);
+    w[j++] = v&0x3ffffff;
+  }
+  return c;
+}
+// am2 avoids a big mult-and-extract completely.
+// Max digit bits should be <= 30 because we do bitwise ops
+// on values up to 2*hdvalue^2-hdvalue-1 (< 2^31)
+function am2(i,x,w,j,c,n) {
+  var xl = x&0x7fff, xh = x>>15;
+  while(--n >= 0) {
+    var l = this[i]&0x7fff;
+    var h = this[i++]>>15;
+    var m = xh*l+h*xl;
+    l = xl*l+((m&0x7fff)<<15)+w[j]+(c&0x3fffffff);
+    c = (l>>>30)+(m>>>15)+xh*h+(c>>>30);
+    w[j++] = l&0x3fffffff;
+  }
+  return c;
+}
+// Alternately, set max digit bits to 28 since some
+// browsers slow down when dealing with 32-bit numbers.
+function am3(i,x,w,j,c,n) {
+  var xl = x&0x3fff, xh = x>>14;
+  while(--n >= 0) {
+    var l = this[i]&0x3fff;
+    var h = this[i++]>>14;
+    var m = xh*l+h*xl;
+    l = xl*l+((m&0x3fff)<<14)+w[j]+c;
+    c = (l>>28)+(m>>14)+xh*h;
+    w[j++] = l&0xfffffff;
+  }
+  return c;
+}
+if(j_lm && (navigatorAppName == "Microsoft Internet Explorer")) {
+  BigInteger.prototype.am = am2;
+  dbits = 30;
+}
+else if(j_lm && (navigatorAppName != "Netscape")) {
+  BigInteger.prototype.am = am1;
+  dbits = 26;
+}
+else { // Mozilla/Netscape seems to prefer am3
+  BigInteger.prototype.am = am3;
+  dbits = 28;
+}
+
+BigInteger.prototype.DB = dbits;
+BigInteger.prototype.DM = ((1<<dbits)-1);
+BigInteger.prototype.DV = (1<<dbits);
+
+var BI_FP = 52;
+BigInteger.prototype.FV = Math.pow(2,BI_FP);
+BigInteger.prototype.F1 = BI_FP-dbits;
+BigInteger.prototype.F2 = 2*dbits-BI_FP;
+
+// Digit conversions
+var BI_RM = "0123456789abcdefghijklmnopqrstuvwxyz";
+var BI_RC = new Array();
+var rr,vv;
+rr = "0".charCodeAt(0);
+for(vv = 0; vv <= 9; ++vv) BI_RC[rr++] = vv;
+rr = "a".charCodeAt(0);
+for(vv = 10; vv < 36; ++vv) BI_RC[rr++] = vv;
+rr = "A".charCodeAt(0);
+for(vv = 10; vv < 36; ++vv) BI_RC[rr++] = vv;
+
+function int2char(n) { return BI_RM.charAt(n); }
+function intAt(s,i) {
+  var c = BI_RC[s.charCodeAt(i)];
+  return (c==null)?-1:c;
+}
+
+// (protected) copy this to r
+function bnpCopyTo(r) {
+  for(var i = this.t-1; i >= 0; --i) r[i] = this[i];
+  r.t = this.t;
+  r.s = this.s;
+}
+
+// (protected) set from integer value x, -DV <= x < DV
+function bnpFromInt(x) {
+  this.t = 1;
+  this.s = (x<0)?-1:0;
+  if(x > 0) this[0] = x;
+  else if(x < -1) this[0] = x+this.DV;
+  else this.t = 0;
+}
+
+// return bigint initialized to value
+function nbv(i) { var r = nbi(); r.fromInt(i); return r; }
+
+// (protected) set from string and radix
+function bnpFromString(s,b) {
+  var k;
+  if(b == 16) k = 4;
+  else if(b == 8) k = 3;
+  else if(b == 256) k = 8; // byte array
+  else if(b == 2) k = 1;
+  else if(b == 32) k = 5;
+  else if(b == 4) k = 2;
+  else { this.fromRadix(s,b); return; }
+  this.t = 0;
+  this.s = 0;
+  var i = s.length, mi = false, sh = 0;
+  while(--i >= 0) {
+    var x = (k==8)?s[i]&0xff:intAt(s,i);
+    if(x < 0) {
+      if(s.charAt(i) == "-") mi = true;
+      continue;
+    }
+    mi = false;
+    if(sh == 0)
+      this[this.t++] = x;
+    else if(sh+k > this.DB) {
+      this[this.t-1] |= (x&((1<<(this.DB-sh))-1))<<sh;
+      this[this.t++] = (x>>(this.DB-sh));
+    }
+    else
+      this[this.t-1] |= x<<sh;
+    sh += k;
+    if(sh >= this.DB) sh -= this.DB;
+  }
+  if(k == 8 && (s[0]&0x80) != 0) {
+    this.s = -1;
+    if(sh > 0) this[this.t-1] |= ((1<<(this.DB-sh))-1)<<sh;
+  }
+  this.clamp();
+  if(mi) BigInteger.ZERO.subTo(this,this);
+}
+
+// (protected) clamp off excess high words
+function bnpClamp() {
+  var c = this.s&this.DM;
+  while(this.t > 0 && this[this.t-1] == c) --this.t;
+}
+
+// (public) return string representation in given radix
+function bnToString(b) {
+  if(this.s < 0) return "-"+this.negate().toString(b);
+  var k;
+  if(b == 16) k = 4;
+  else if(b == 8) k = 3;
+  else if(b == 2) k = 1;
+  else if(b == 32) k = 5;
+  else if(b == 4) k = 2;
+  else return this.toRadix(b);
+  var km = (1<<k)-1, d, m = false, r = "", i = this.t;
+  var p = this.DB-(i*this.DB)%k;
+  if(i-- > 0) {
+    if(p < this.DB && (d = this[i]>>p) > 0) { m = true; r = int2char(d); }
+    while(i >= 0) {
+      if(p < k) {
+        d = (this[i]&((1<<p)-1))<<(k-p);
+        d |= this[--i]>>(p+=this.DB-k);
+      }
+      else {
+        d = (this[i]>>(p-=k))&km;
+        if(p <= 0) { p += this.DB; --i; }
+      }
+      if(d > 0) m = true;
+      if(m) r += int2char(d);
+    }
+  }
+  return m?r:"0";
+}
+
+// (public) -this
+function bnNegate() { var r = nbi(); BigInteger.ZERO.subTo(this,r); return r; }
+
+// (public) |this|
+function bnAbs() { return (this.s<0)?this.negate():this; }
+
+// (public) return + if this > a, - if this < a, 0 if equal
+function bnCompareTo(a) {
+  var r = this.s-a.s;
+  if(r != 0) return r;
+  var i = this.t;
+  r = i-a.t;
+  if(r != 0) return (this.s<0)?-r:r;
+  while(--i >= 0) if((r=this[i]-a[i]) != 0) return r;
+  return 0;
+}
+
+// returns bit length of the integer x
+function nbits(x) {
+  var r = 1, t;
+  if((t=x>>>16) != 0) { x = t; r += 16; }
+  if((t=x>>8) != 0) { x = t; r += 8; }
+  if((t=x>>4) != 0) { x = t; r += 4; }
+  if((t=x>>2) != 0) { x = t; r += 2; }
+  if((t=x>>1) != 0) { x = t; r += 1; }
+  return r;
+}
+
+// (public) return the number of bits in "this"
+function bnBitLength() {
+  if(this.t <= 0) return 0;
+  return this.DB*(this.t-1)+nbits(this[this.t-1]^(this.s&this.DM));
+}
+
+// (protected) r = this << n*DB
+function bnpDLShiftTo(n,r) {
+  var i;
+  for(i = this.t-1; i >= 0; --i) r[i+n] = this[i];
+  for(i = n-1; i >= 0; --i) r[i] = 0;
+  r.t = this.t+n;
+  r.s = this.s;
+}
+
+// (protected) r = this >> n*DB
+function bnpDRShiftTo(n,r) {
+  for(var i = n; i < this.t; ++i) r[i-n] = this[i];
+  r.t = Math.max(this.t-n,0);
+  r.s = this.s;
+}
+
+// (protected) r = this << n
+function bnpLShiftTo(n,r) {
+  var bs = n%this.DB;
+  var cbs = this.DB-bs;
+  var bm = (1<<cbs)-1;
+  var ds = Math.floor(n/this.DB), c = (this.s<<bs)&this.DM, i;
+  for(i = this.t-1; i >= 0; --i) {
+    r[i+ds+1] = (this[i]>>cbs)|c;
+    c = (this[i]&bm)<<bs;
+  }
+  for(i = ds-1; i >= 0; --i) r[i] = 0;
+  r[ds] = c;
+  r.t = this.t+ds+1;
+  r.s = this.s;
+  r.clamp();
+}
+
+// (protected) r = this >> n
+function bnpRShiftTo(n,r) {
+  r.s = this.s;
+  var ds = Math.floor(n/this.DB);
+  if(ds >= this.t) { r.t = 0; return; }
+  var bs = n%this.DB;
+  var cbs = this.DB-bs;
+  var bm = (1<<bs)-1;
+  r[0] = this[ds]>>bs;
+  for(var i = ds+1; i < this.t; ++i) {
+    r[i-ds-1] |= (this[i]&bm)<<cbs;
+    r[i-ds] = this[i]>>bs;
+  }
+  if(bs > 0) r[this.t-ds-1] |= (this.s&bm)<<cbs;
+  r.t = this.t-ds;
+  r.clamp();
+}
+
+// (protected) r = this - a
+function bnpSubTo(a,r) {
+  var i = 0, c = 0, m = Math.min(a.t,this.t);
+  while(i < m) {
+    c += this[i]-a[i];
+    r[i++] = c&this.DM;
+    c >>= this.DB;
+  }
+  if(a.t < this.t) {
+    c -= a.s;
+    while(i < this.t) {
+      c += this[i];
+      r[i++] = c&this.DM;
+      c >>= this.DB;
+    }
+    c += this.s;
+  }
+  else {
+    c += this.s;
+    while(i < a.t) {
+      c -= a[i];
+      r[i++] = c&this.DM;
+      c >>= this.DB;
+    }
+    c -= a.s;
+  }
+  r.s = (c<0)?-1:0;
+  if(c < -1) r[i++] = this.DV+c;
+  else if(c > 0) r[i++] = c;
+  r.t = i;
+  r.clamp();
+}
+
+// (protected) r = this * a, r != this,a (HAC 14.12)
+// "this" should be the larger one if appropriate.
+function bnpMultiplyTo(a,r) {
+  var x = this.abs(), y = a.abs();
+  var i = x.t;
+  r.t = i+y.t;
+  while(--i >= 0) r[i] = 0;
+  for(i = 0; i < y.t; ++i) r[i+x.t] = x.am(0,y[i],r,i,0,x.t);
+  r.s = 0;
+  r.clamp();
+  if(this.s != a.s) BigInteger.ZERO.subTo(r,r);
+}
+
+// (protected) r = this^2, r != this (HAC 14.16)
+function bnpSquareTo(r) {
+  var x = this.abs();
+  var i = r.t = 2*x.t;
+  while(--i >= 0) r[i] = 0;
+  for(i = 0; i < x.t-1; ++i) {
+    var c = x.am(i,x[i],r,2*i,0,1);
+    if((r[i+x.t]+=x.am(i+1,2*x[i],r,2*i+1,c,x.t-i-1)) >= x.DV) {
+      r[i+x.t] -= x.DV;
+      r[i+x.t+1] = 1;
+    }
+  }
+  if(r.t > 0) r[r.t-1] += x.am(i,x[i],r,2*i,0,1);
+  r.s = 0;
+  r.clamp();
+}
+
+// (protected) divide this by m, quotient and remainder to q, r (HAC 14.20)
+// r != q, this != m.  q or r may be null.
+function bnpDivRemTo(m,q,r) {
+  var pm = m.abs();
+  if(pm.t <= 0) return;
+  var pt = this.abs();
+  if(pt.t < pm.t) {
+    if(q != null) q.fromInt(0);
+    if(r != null) this.copyTo(r);
+    return;
+  }
+  if(r == null) r = nbi();
+  var y = nbi(), ts = this.s, ms = m.s;
+  var nsh = this.DB-nbits(pm[pm.t-1]);	// normalize modulus
+  if(nsh > 0) { pm.lShiftTo(nsh,y); pt.lShiftTo(nsh,r); }
+  else { pm.copyTo(y); pt.copyTo(r); }
+  var ys = y.t;
+  var y0 = y[ys-1];
+  if(y0 == 0) return;
+  var yt = y0*(1<<this.F1)+((ys>1)?y[ys-2]>>this.F2:0);
+  var d1 = this.FV/yt, d2 = (1<<this.F1)/yt, e = 1<<this.F2;
+  var i = r.t, j = i-ys, t = (q==null)?nbi():q;
+  y.dlShiftTo(j,t);
+  if(r.compareTo(t) >= 0) {
+    r[r.t++] = 1;
+    r.subTo(t,r);
+  }
+  BigInteger.ONE.dlShiftTo(ys,t);
+  t.subTo(y,y);	// "negative" y so we can replace sub with am later
+  while(y.t < ys) y[y.t++] = 0;
+  while(--j >= 0) {
+    // Estimate quotient digit
+    var qd = (r[--i]==y0)?this.DM:Math.floor(r[i]*d1+(r[i-1]+e)*d2);
+    if((r[i]+=y.am(0,qd,r,j,0,ys)) < qd) {	// Try it out
+      y.dlShiftTo(j,t);
+      r.subTo(t,r);
+      while(r[i] < --qd) r.subTo(t,r);
+    }
+  }
+  if(q != null) {
+    r.drShiftTo(ys,q);
+    if(ts != ms) BigInteger.ZERO.subTo(q,q);
+  }
+  r.t = ys;
+  r.clamp();
+  if(nsh > 0) r.rShiftTo(nsh,r);	// Denormalize remainder
+  if(ts < 0) BigInteger.ZERO.subTo(r,r);
+}
+
+// (public) this mod a
+function bnMod(a) {
+  var r = nbi();
+  this.abs().divRemTo(a,null,r);
+  if(this.s < 0 && r.compareTo(BigInteger.ZERO) > 0) a.subTo(r,r);
+  return r;
+}
+
+// Modular reduction using "classic" algorithm
+function Classic(m) { this.m = m; }
+function cConvert(x) {
+  if(x.s < 0 || x.compareTo(this.m) >= 0) return x.mod(this.m);
+  else return x;
+}
+function cRevert(x) { return x; }
+function cReduce(x) { x.divRemTo(this.m,null,x); }
+function cMulTo(x,y,r) { x.multiplyTo(y,r); this.reduce(r); }
+function cSqrTo(x,r) { x.squareTo(r); this.reduce(r); }
+
+Classic.prototype.convert = cConvert;
+Classic.prototype.revert = cRevert;
+Classic.prototype.reduce = cReduce;
+Classic.prototype.mulTo = cMulTo;
+Classic.prototype.sqrTo = cSqrTo;
+
+// (protected) return "-1/this % 2^DB"; useful for Mont. reduction
+// justification:
+//         xy == 1 (mod m)
+//         xy =  1+km
+//   xy(2-xy) = (1+km)(1-km)
+// x[y(2-xy)] = 1-k^2m^2
+// x[y(2-xy)] == 1 (mod m^2)
+// if y is 1/x mod m, then y(2-xy) is 1/x mod m^2
+// should reduce x and y(2-xy) by m^2 at each step to keep size bounded.
+// JS multiply "overflows" differently from C/C++, so care is needed here.
+function bnpInvDigit() {
+  if(this.t < 1) return 0;
+  var x = this[0];
+  if((x&1) == 0) return 0;
+  var y = x&3;		// y == 1/x mod 2^2
+  y = (y*(2-(x&0xf)*y))&0xf;	// y == 1/x mod 2^4
+  y = (y*(2-(x&0xff)*y))&0xff;	// y == 1/x mod 2^8
+  y = (y*(2-(((x&0xffff)*y)&0xffff)))&0xffff;	// y == 1/x mod 2^16
+  // last step - calculate inverse mod DV directly;
+  // assumes 16 < DB <= 32 and assumes ability to handle 48-bit ints
+  y = (y*(2-x*y%this.DV))%this.DV;		// y == 1/x mod 2^dbits
+  // we really want the negative inverse, and -DV < y < DV
+  return (y>0)?this.DV-y:-y;
+}
+
+// Montgomery reduction
+function Montgomery(m) {
+  this.m = m;
+  this.mp = m.invDigit();
+  this.mpl = this.mp&0x7fff;
+  this.mph = this.mp>>15;
+  this.um = (1<<(m.DB-15))-1;
+  this.mt2 = 2*m.t;
+}
+
+// xR mod m
+function montConvert(x) {
+  var r = nbi();
+  x.abs().dlShiftTo(this.m.t,r);
+  r.divRemTo(this.m,null,r);
+  if(x.s < 0 && r.compareTo(BigInteger.ZERO) > 0) this.m.subTo(r,r);
+  return r;
+}
+
+// x/R mod m
+function montRevert(x) {
+  var r = nbi();
+  x.copyTo(r);
+  this.reduce(r);
+  return r;
+}
+
+// x = x/R mod m (HAC 14.32)
+function montReduce(x) {
+  while(x.t <= this.mt2)	// pad x so am has enough room later
+    x[x.t++] = 0;
+  for(var i = 0; i < this.m.t; ++i) {
+    // faster way of calculating u0 = x[i]*mp mod DV
+    var j = x[i]&0x7fff;
+    var u0 = (j*this.mpl+(((j*this.mph+(x[i]>>15)*this.mpl)&this.um)<<15))&x.DM;
+    // use am to combine the multiply-shift-add into one call
+    j = i+this.m.t;
+    x[j] += this.m.am(0,u0,x,i,0,this.m.t);
+    // propagate carry
+    while(x[j] >= x.DV) { x[j] -= x.DV; x[++j]++; }
+  }
+  x.clamp();
+  x.drShiftTo(this.m.t,x);
+  if(x.compareTo(this.m) >= 0) x.subTo(this.m,x);
+}
+
+// r = "x^2/R mod m"; x != r
+function montSqrTo(x,r) { x.squareTo(r); this.reduce(r); }
+
+// r = "xy/R mod m"; x,y != r
+function montMulTo(x,y,r) { x.multiplyTo(y,r); this.reduce(r); }
+
+Montgomery.prototype.convert = montConvert;
+Montgomery.prototype.revert = montRevert;
+Montgomery.prototype.reduce = montReduce;
+Montgomery.prototype.mulTo = montMulTo;
+Montgomery.prototype.sqrTo = montSqrTo;
+
+// (protected) true iff this is even
+function bnpIsEven() { return ((this.t>0)?(this[0]&1):this.s) == 0; }
+
+// (protected) this^e, e < 2^32, doing sqr and mul with "r" (HAC 14.79)
+function bnpExp(e,z) {
+  if(e > 0xffffffff || e < 1) return BigInteger.ONE;
+  var r = nbi(), r2 = nbi(), g = z.convert(this), i = nbits(e)-1;
+  g.copyTo(r);
+  while(--i >= 0) {
+    z.sqrTo(r,r2);
+    if((e&(1<<i)) > 0) z.mulTo(r2,g,r);
+    else { var t = r; r = r2; r2 = t; }
+  }
+  return z.revert(r);
+}
+
+// (public) this^e % m, 0 <= e < 2^32
+function bnModPowInt(e,m) {
+  var z;
+  if(e < 256 || m.isEven()) z = new Classic(m); else z = new Montgomery(m);
+  return this.exp(e,z);
+}
+
+// protected
+BigInteger.prototype.copyTo = bnpCopyTo;
+BigInteger.prototype.fromInt = bnpFromInt;
+BigInteger.prototype.fromString = bnpFromString;
+BigInteger.prototype.clamp = bnpClamp;
+BigInteger.prototype.dlShiftTo = bnpDLShiftTo;
+BigInteger.prototype.drShiftTo = bnpDRShiftTo;
+BigInteger.prototype.lShiftTo = bnpLShiftTo;
+BigInteger.prototype.rShiftTo = bnpRShiftTo;
+BigInteger.prototype.subTo = bnpSubTo;
+BigInteger.prototype.multiplyTo = bnpMultiplyTo;
+BigInteger.prototype.squareTo = bnpSquareTo;
+BigInteger.prototype.divRemTo = bnpDivRemTo;
+BigInteger.prototype.invDigit = bnpInvDigit;
+BigInteger.prototype.isEven = bnpIsEven;
+BigInteger.prototype.exp = bnpExp;
+
+// public
+BigInteger.prototype.toString = bnToString;
+BigInteger.prototype.negate = bnNegate;
+BigInteger.prototype.abs = bnAbs;
+BigInteger.prototype.compareTo = bnCompareTo;
+BigInteger.prototype.bitLength = bnBitLength;
+BigInteger.prototype.mod = bnMod;
+BigInteger.prototype.modPowInt = bnModPowInt;
+
+// "constants"
+BigInteger.ZERO = nbv(0);
+BigInteger.ONE = nbv(1);
+
+
+// Extended JavaScript BN functions, required for RSA private ops.
+
+// Version 1.1: new BigInteger("0", 10) returns "proper" zero
+// Version 1.2: square() API, isProbablePrime fix
+
+// (public)
+function bnClone() { var r = nbi(); this.copyTo(r); return r; }
+
+// (public) return value as integer
+function bnIntValue() {
+  if(this.s < 0) {
+    if(this.t == 1) return this[0]-this.DV;
+    else if(this.t == 0) return -1;
+  }
+  else if(this.t == 1) return this[0];
+  else if(this.t == 0) return 0;
+  // assumes 16 < DB < 32
+  return ((this[1]&((1<<(32-this.DB))-1))<<this.DB)|this[0];
+}
+
+// (public) return value as byte
+function bnByteValue() { return (this.t==0)?this.s:(this[0]<<24)>>24; }
+
+// (public) return value as short (assumes DB>=16)
+function bnShortValue() { return (this.t==0)?this.s:(this[0]<<16)>>16; }
+
+// (protected) return x s.t. r^x < DV
+function bnpChunkSize(r) { return Math.floor(Math.LN2*this.DB/Math.log(r)); }
+
+// (public) 0 if this == 0, 1 if this > 0
+function bnSigNum() {
+  if(this.s < 0) return -1;
+  else if(this.t <= 0 || (this.t == 1 && this[0] <= 0)) return 0;
+  else return 1;
+}
+
+// (protected) convert to radix string
+function bnpToRadix(b) {
+  if(b == null) b = 10;
+  if(this.signum() == 0 || b < 2 || b > 36) return "0";
+  var cs = this.chunkSize(b);
+  var a = Math.pow(b,cs);
+  var d = nbv(a), y = nbi(), z = nbi(), r = "";
+  this.divRemTo(d,y,z);
+  while(y.signum() > 0) {
+    r = (a+z.intValue()).toString(b).substr(1) + r;
+    y.divRemTo(d,y,z);
+  }
+  return z.intValue().toString(b) + r;
+}
+
+// (protected) convert from radix string
+function bnpFromRadix(s,b) {
+  this.fromInt(0);
+  if(b == null) b = 10;
+  var cs = this.chunkSize(b);
+  var d = Math.pow(b,cs), mi = false, j = 0, w = 0;
+  for(var i = 0; i < s.length; ++i) {
+    var x = intAt(s,i);
+    if(x < 0) {
+      if(s.charAt(i) == "-" && this.signum() == 0) mi = true;
+      continue;
+    }
+    w = b*w+x;
+    if(++j >= cs) {
+      this.dMultiply(d);
+      this.dAddOffset(w,0);
+      j = 0;
+      w = 0;
+    }
+  }
+  if(j > 0) {
+    this.dMultiply(Math.pow(b,j));
+    this.dAddOffset(w,0);
+  }
+  if(mi) BigInteger.ZERO.subTo(this,this);
+}
+
+// (protected) alternate constructor
+function bnpFromNumber(a,b,c) {
+  if("number" == typeof b) {
+    // new BigInteger(int,int,RNG)
+    if(a < 2) this.fromInt(1);
+    else {
+      this.fromNumber(a,c);
+      if(!this.testBit(a-1))	// force MSB set
+        this.bitwiseTo(BigInteger.ONE.shiftLeft(a-1),op_or,this);
+      if(this.isEven()) this.dAddOffset(1,0); // force odd
+      while(!this.isProbablePrime(b)) {
+        this.dAddOffset(2,0);
+        if(this.bitLength() > a) this.subTo(BigInteger.ONE.shiftLeft(a-1),this);
+      }
+    }
+  }
+  else {
+    // new BigInteger(int,RNG)
+    var x = new Array(), t = a&7;
+    x.length = (a>>3)+1;
+    b.nextBytes(x);
+    if(t > 0) x[0] &= ((1<<t)-1); else x[0] = 0;
+    this.fromString(x,256);
+  }
+}
+
+// (public) convert to bigendian byte array
+function bnToByteArray() {
+  var i = this.t, r = new Array();
+  r[0] = this.s;
+  var p = this.DB-(i*this.DB)%8, d, k = 0;
+  if(i-- > 0) {
+    if(p < this.DB && (d = this[i]>>p) != (this.s&this.DM)>>p)
+      r[k++] = d|(this.s<<(this.DB-p));
+    while(i >= 0) {
+      if(p < 8) {
+        d = (this[i]&((1<<p)-1))<<(8-p);
+        d |= this[--i]>>(p+=this.DB-8);
+      }
+      else {
+        d = (this[i]>>(p-=8))&0xff;
+        if(p <= 0) { p += this.DB; --i; }
+      }
+      if((d&0x80) != 0) d |= -256;
+      if(k == 0 && (this.s&0x80) != (d&0x80)) ++k;
+      if(k > 0 || d != this.s) r[k++] = d;
+    }
+  }
+  return r;
+}
+
+function bnEquals(a) { return(this.compareTo(a)==0); }
+function bnMin(a) { return(this.compareTo(a)<0)?this:a; }
+function bnMax(a) { return(this.compareTo(a)>0)?this:a; }
+
+// (protected) r = this op a (bitwise)
+function bnpBitwiseTo(a,op,r) {
+  var i, f, m = Math.min(a.t,this.t);
+  for(i = 0; i < m; ++i) r[i] = op(this[i],a[i]);
+  if(a.t < this.t) {
+    f = a.s&this.DM;
+    for(i = m; i < this.t; ++i) r[i] = op(this[i],f);
+    r.t = this.t;
+  }
+  else {
+    f = this.s&this.DM;
+    for(i = m; i < a.t; ++i) r[i] = op(f,a[i]);
+    r.t = a.t;
+  }
+  r.s = op(this.s,a.s);
+  r.clamp();
+}
+
+// (public) this & a
+function op_and(x,y) { return x&y; }
+function bnAnd(a) { var r = nbi(); this.bitwiseTo(a,op_and,r); return r; }
+
+// (public) this | a
+function op_or(x,y) { return x|y; }
+function bnOr(a) { var r = nbi(); this.bitwiseTo(a,op_or,r); return r; }
+
+// (public) this ^ a
+function op_xor(x,y) { return x^y; }
+function bnXor(a) { var r = nbi(); this.bitwiseTo(a,op_xor,r); return r; }
+
+// (public) this & ~a
+function op_andnot(x,y) { return x&~y; }
+function bnAndNot(a) { var r = nbi(); this.bitwiseTo(a,op_andnot,r); return r; }
+
+// (public) ~this
+function bnNot() {
+  var r = nbi();
+  for(var i = 0; i < this.t; ++i) r[i] = this.DM&~this[i];
+  r.t = this.t;
+  r.s = ~this.s;
+  return r;
+}
+
+// (public) this << n
+function bnShiftLeft(n) {
+  var r = nbi();
+  if(n < 0) this.rShiftTo(-n,r); else this.lShiftTo(n,r);
+  return r;
+}
+
+// (public) this >> n
+function bnShiftRight(n) {
+  var r = nbi();
+  if(n < 0) this.lShiftTo(-n,r); else this.rShiftTo(n,r);
+  return r;
+}
+
+// return index of lowest 1-bit in x, x < 2^31
+function lbit(x) {
+  if(x == 0) return -1;
+  var r = 0;
+  if((x&0xffff) == 0) { x >>= 16; r += 16; }
+  if((x&0xff) == 0) { x >>= 8; r += 8; }
+  if((x&0xf) == 0) { x >>= 4; r += 4; }
+  if((x&3) == 0) { x >>= 2; r += 2; }
+  if((x&1) == 0) ++r;
+  return r;
+}
+
+// (public) returns index of lowest 1-bit (or -1 if none)
+function bnGetLowestSetBit() {
+  for(var i = 0; i < this.t; ++i)
+    if(this[i] != 0) return i*this.DB+lbit(this[i]);
+  if(this.s < 0) return this.t*this.DB;
+  return -1;
+}
+
+// return number of 1 bits in x
+function cbit(x) {
+  var r = 0;
+  while(x != 0) { x &= x-1; ++r; }
+  return r;
+}
+
+// (public) return number of set bits
+function bnBitCount() {
+  var r = 0, x = this.s&this.DM;
+  for(var i = 0; i < this.t; ++i) r += cbit(this[i]^x);
+  return r;
+}
+
+// (public) true iff nth bit is set
+function bnTestBit(n) {
+  var j = Math.floor(n/this.DB);
+  if(j >= this.t) return(this.s!=0);
+  return((this[j]&(1<<(n%this.DB)))!=0);
+}
+
+// (protected) this op (1<<n)
+function bnpChangeBit(n,op) {
+  var r = BigInteger.ONE.shiftLeft(n);
+  this.bitwiseTo(r,op,r);
+  return r;
+}
+
+// (public) this | (1<<n)
+function bnSetBit(n) { return this.changeBit(n,op_or); }
+
+// (public) this & ~(1<<n)
+function bnClearBit(n) { return this.changeBit(n,op_andnot); }
+
+// (public) this ^ (1<<n)
+function bnFlipBit(n) { return this.changeBit(n,op_xor); }
+
+// (protected) r = this + a
+function bnpAddTo(a,r) {
+  var i = 0, c = 0, m = Math.min(a.t,this.t);
+  while(i < m) {
+    c += this[i]+a[i];
+    r[i++] = c&this.DM;
+    c >>= this.DB;
+  }
+  if(a.t < this.t) {
+    c += a.s;
+    while(i < this.t) {
+      c += this[i];
+      r[i++] = c&this.DM;
+      c >>= this.DB;
+    }
+    c += this.s;
+  }
+  else {
+    c += this.s;
+    while(i < a.t) {
+      c += a[i];
+      r[i++] = c&this.DM;
+      c >>= this.DB;
+    }
+    c += a.s;
+  }
+  r.s = (c<0)?-1:0;
+  if(c > 0) r[i++] = c;
+  else if(c < -1) r[i++] = this.DV+c;
+  r.t = i;
+  r.clamp();
+}
+
+// (public) this + a
+function bnAdd(a) { var r = nbi(); this.addTo(a,r); return r; }
+
+// (public) this - a
+function bnSubtract(a) { var r = nbi(); this.subTo(a,r); return r; }
+
+// (public) this * a
+function bnMultiply(a) { var r = nbi(); this.multiplyTo(a,r); return r; }
+
+// (public) this^2
+function bnSquare() { var r = nbi(); this.squareTo(r); return r; }
+
+// (public) this / a
+function bnDivide(a) { var r = nbi(); this.divRemTo(a,r,null); return r; }
+
+// (public) this % a
+function bnRemainder(a) { var r = nbi(); this.divRemTo(a,null,r); return r; }
+
+// (public) [this/a,this%a]
+function bnDivideAndRemainder(a) {
+  var q = nbi(), r = nbi();
+  this.divRemTo(a,q,r);
+  return new Array(q,r);
+}
+
+// (protected) this *= n, this >= 0, 1 < n < DV
+function bnpDMultiply(n) {
+  this[this.t] = this.am(0,n-1,this,0,0,this.t);
+  ++this.t;
+  this.clamp();
+}
+
+// (protected) this += n << w words, this >= 0
+function bnpDAddOffset(n,w) {
+  if(n == 0) return;
+  while(this.t <= w) this[this.t++] = 0;
+  this[w] += n;
+  while(this[w] >= this.DV) {
+    this[w] -= this.DV;
+    if(++w >= this.t) this[this.t++] = 0;
+    ++this[w];
+  }
+}
+
+// A "null" reducer
+function NullExp() {}
+function nNop(x) { return x; }
+function nMulTo(x,y,r) { x.multiplyTo(y,r); }
+function nSqrTo(x,r) { x.squareTo(r); }
+
+NullExp.prototype.convert = nNop;
+NullExp.prototype.revert = nNop;
+NullExp.prototype.mulTo = nMulTo;
+NullExp.prototype.sqrTo = nSqrTo;
+
+// (public) this^e
+function bnPow(e) { return this.exp(e,new NullExp()); }
+
+// (protected) r = lower n words of "this * a", a.t <= n
+// "this" should be the larger one if appropriate.
+function bnpMultiplyLowerTo(a,n,r) {
+  var i = Math.min(this.t+a.t,n);
+  r.s = 0; // assumes a,this >= 0
+  r.t = i;
+  while(i > 0) r[--i] = 0;
+  var j;
+  for(j = r.t-this.t; i < j; ++i) r[i+this.t] = this.am(0,a[i],r,i,0,this.t);
+  for(j = Math.min(a.t,n); i < j; ++i) this.am(0,a[i],r,i,0,n-i);
+  r.clamp();
+}
+
+// (protected) r = "this * a" without lower n words, n > 0
+// "this" should be the larger one if appropriate.
+function bnpMultiplyUpperTo(a,n,r) {
+  --n;
+  var i = r.t = this.t+a.t-n;
+  r.s = 0; // assumes a,this >= 0
+  while(--i >= 0) r[i] = 0;
+  for(i = Math.max(n-this.t,0); i < a.t; ++i)
+    r[this.t+i-n] = this.am(n-i,a[i],r,0,0,this.t+i-n);
+  r.clamp();
+  r.drShiftTo(1,r);
+}
+
+// Barrett modular reduction
+function Barrett(m) {
+  // setup Barrett
+  this.r2 = nbi();
+  this.q3 = nbi();
+  BigInteger.ONE.dlShiftTo(2*m.t,this.r2);
+  this.mu = this.r2.divide(m);
+  this.m = m;
+}
+
+function barrettConvert(x) {
+  if(x.s < 0 || x.t > 2*this.m.t) return x.mod(this.m);
+  else if(x.compareTo(this.m) < 0) return x;
+  else { var r = nbi(); x.copyTo(r); this.reduce(r); return r; }
+}
+
+function barrettRevert(x) { return x; }
+
+// x = x mod m (HAC 14.42)
+function barrettReduce(x) {
+  x.drShiftTo(this.m.t-1,this.r2);
+  if(x.t > this.m.t+1) { x.t = this.m.t+1; x.clamp(); }
+  this.mu.multiplyUpperTo(this.r2,this.m.t+1,this.q3);
+  this.m.multiplyLowerTo(this.q3,this.m.t+1,this.r2);
+  while(x.compareTo(this.r2) < 0) x.dAddOffset(1,this.m.t+1);
+  x.subTo(this.r2,x);
+  while(x.compareTo(this.m) >= 0) x.subTo(this.m,x);
+}
+
+// r = x^2 mod m; x != r
+function barrettSqrTo(x,r) { x.squareTo(r); this.reduce(r); }
+
+// r = x*y mod m; x,y != r
+function barrettMulTo(x,y,r) { x.multiplyTo(y,r); this.reduce(r); }
+
+Barrett.prototype.convert = barrettConvert;
+Barrett.prototype.revert = barrettRevert;
+Barrett.prototype.reduce = barrettReduce;
+Barrett.prototype.mulTo = barrettMulTo;
+Barrett.prototype.sqrTo = barrettSqrTo;
+
+// (public) this^e % m (HAC 14.85)
+function bnModPow(e,m) {
+  var i = e.bitLength(), k, r = nbv(1), z;
+  if(i <= 0) return r;
+  else if(i < 18) k = 1;
+  else if(i < 48) k = 3;
+  else if(i < 144) k = 4;
+  else if(i < 768) k = 5;
+  else k = 6;
+  if(i < 8)
+    z = new Classic(m);
+  else if(m.isEven())
+    z = new Barrett(m);
+  else
+    z = new Montgomery(m);
+
+  // precomputation
+  var g = new Array(), n = 3, k1 = k-1, km = (1<<k)-1;
+  g[1] = z.convert(this);
+  if(k > 1) {
+    var g2 = nbi();
+    z.sqrTo(g[1],g2);
+    while(n <= km) {
+      g[n] = nbi();
+      z.mulTo(g2,g[n-2],g[n]);
+      n += 2;
+    }
+  }
+
+  var j = e.t-1, w, is1 = true, r2 = nbi(), t;
+  i = nbits(e[j])-1;
+  while(j >= 0) {
+    if(i >= k1) w = (e[j]>>(i-k1))&km;
+    else {
+      w = (e[j]&((1<<(i+1))-1))<<(k1-i);
+      if(j > 0) w |= e[j-1]>>(this.DB+i-k1);
+    }
+
+    n = k;
+    while((w&1) == 0) { w >>= 1; --n; }
+    if((i -= n) < 0) { i += this.DB; --j; }
+    if(is1) {	// ret == 1, don't bother squaring or multiplying it
+      g[w].copyTo(r);
+      is1 = false;
+    }
+    else {
+      while(n > 1) { z.sqrTo(r,r2); z.sqrTo(r2,r); n -= 2; }
+      if(n > 0) z.sqrTo(r,r2); else { t = r; r = r2; r2 = t; }
+      z.mulTo(r2,g[w],r);
+    }
+
+    while(j >= 0 && (e[j]&(1<<i)) == 0) {
+      z.sqrTo(r,r2); t = r; r = r2; r2 = t;
+      if(--i < 0) { i = this.DB-1; --j; }
+    }
+  }
+  return z.revert(r);
+}
+
+// (public) gcd(this,a) (HAC 14.54)
+function bnGCD(a) {
+  var x = (this.s<0)?this.negate():this.clone();
+  var y = (a.s<0)?a.negate():a.clone();
+  if(x.compareTo(y) < 0) { var t = x; x = y; y = t; }
+  var i = x.getLowestSetBit(), g = y.getLowestSetBit();
+  if(g < 0) return x;
+  if(i < g) g = i;
+  if(g > 0) {
+    x.rShiftTo(g,x);
+    y.rShiftTo(g,y);
+  }
+  while(x.signum() > 0) {
+    if((i = x.getLowestSetBit()) > 0) x.rShiftTo(i,x);
+    if((i = y.getLowestSetBit()) > 0) y.rShiftTo(i,y);
+    if(x.compareTo(y) >= 0) {
+      x.subTo(y,x);
+      x.rShiftTo(1,x);
+    }
+    else {
+      y.subTo(x,y);
+      y.rShiftTo(1,y);
+    }
+  }
+  if(g > 0) y.lShiftTo(g,y);
+  return y;
+}
+
+// (protected) this % n, n < 2^26
+function bnpModInt(n) {
+  if(n <= 0) return 0;
+  var d = this.DV%n, r = (this.s<0)?n-1:0;
+  if(this.t > 0)
+    if(d == 0) r = this[0]%n;
+    else for(var i = this.t-1; i >= 0; --i) r = (d*r+this[i])%n;
+  return r;
+}
+
+// (public) 1/this % m (HAC 14.61)
+function bnModInverse(m) {
+  var ac = m.isEven();
+  if((this.isEven() && ac) || m.signum() == 0) return BigInteger.ZERO;
+  var u = m.clone(), v = this.clone();
+  var a = nbv(1), b = nbv(0), c = nbv(0), d = nbv(1);
+  while(u.signum() != 0) {
+    while(u.isEven()) {
+      u.rShiftTo(1,u);
+      if(ac) {
+        if(!a.isEven() || !b.isEven()) { a.addTo(this,a); b.subTo(m,b); }
+        a.rShiftTo(1,a);
+      }
+      else if(!b.isEven()) b.subTo(m,b);
+      b.rShiftTo(1,b);
+    }
+    while(v.isEven()) {
+      v.rShiftTo(1,v);
+      if(ac) {
+        if(!c.isEven() || !d.isEven()) { c.addTo(this,c); d.subTo(m,d); }
+        c.rShiftTo(1,c);
+      }
+      else if(!d.isEven()) d.subTo(m,d);
+      d.rShiftTo(1,d);
+    }
+    if(u.compareTo(v) >= 0) {
+      u.subTo(v,u);
+      if(ac) a.subTo(c,a);
+      b.subTo(d,b);
+    }
+    else {
+      v.subTo(u,v);
+      if(ac) c.subTo(a,c);
+      d.subTo(b,d);
+    }
+  }
+  if(v.compareTo(BigInteger.ONE) != 0) return BigInteger.ZERO;
+  if(d.compareTo(m) >= 0) return d.subtract(m);
+  if(d.signum() < 0) d.addTo(m,d); else return d;
+  if(d.signum() < 0) return d.add(m); else return d;
+}
+
+var lowprimes = [2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97,101,103,107,109,113,127,131,137,139,149,151,157,163,167,173,179,181,191,193,197,199,211,223,227,229,233,239,241,251,257,263,269,271,277,281,283,293,307,311,313,317,331,337,347,349,353,359,367,373,379,383,389,397,401,409,419,421,431,433,439,443,449,457,461,463,467,479,487,491,499,503,509,521,523,541,547,557,563,569,571,577,587,593,599,601,607,613,617,619,631,641,643,647,653,659,661,673,677,683,691,701,709,719,727,733,739,743,751,757,761,769,773,787,797,809,811,821,823,827,829,839,853,857,859,863,877,881,883,887,907,911,919,929,937,941,947,953,967,971,977,983,991,997];
+var lplim = (1<<26)/lowprimes[lowprimes.length-1];
+
+// (public) test primality with certainty >= 1-.5^t
+function bnIsProbablePrime(t) {
+  var i, x = this.abs();
+  if(x.t == 1 && x[0] <= lowprimes[lowprimes.length-1]) {
+    for(i = 0; i < lowprimes.length; ++i)
+      if(x[0] == lowprimes[i]) return true;
+    return false;
+  }
+  if(x.isEven()) return false;
+  i = 1;
+  while(i < lowprimes.length) {
+    var m = lowprimes[i], j = i+1;
+    while(j < lowprimes.length && m < lplim) m *= lowprimes[j++];
+    m = x.modInt(m);
+    while(i < j) if(m%lowprimes[i++] == 0) return false;
+  }
+  return x.millerRabin(t);
+}
+
+// (protected) true if probably prime (HAC 4.24, Miller-Rabin)
+function bnpMillerRabin(t) {
+  var n1 = this.subtract(BigInteger.ONE);
+  var k = n1.getLowestSetBit();
+  if(k <= 0) return false;
+  var r = n1.shiftRight(k);
+  t = (t+1)>>1;
+  if(t > lowprimes.length) t = lowprimes.length;
+  var a = nbi();
+  for(var i = 0; i < t; ++i) {
+    //Pick bases at random, instead of starting at 2
+    a.fromInt(lowprimes[Math.floor(Math.random()*lowprimes.length)]);
+    var y = a.modPow(r,this);
+    if(y.compareTo(BigInteger.ONE) != 0 && y.compareTo(n1) != 0) {
+      var j = 1;
+      while(j++ < k && y.compareTo(n1) != 0) {
+        y = y.modPowInt(2,this);
+        if(y.compareTo(BigInteger.ONE) == 0) return false;
+      }
+      if(y.compareTo(n1) != 0) return false;
+    }
+  }
+  return true;
+}
+
+// convert the number to a floating point value.
+function bnToDouble() {
+  return parseFloat(this.toString(10));
+}
+
+// protected
+BigInteger.prototype.chunkSize = bnpChunkSize;
+BigInteger.prototype.toRadix = bnpToRadix;
+BigInteger.prototype.fromRadix = bnpFromRadix;
+BigInteger.prototype.fromNumber = bnpFromNumber;
+BigInteger.prototype.bitwiseTo = bnpBitwiseTo;
+BigInteger.prototype.changeBit = bnpChangeBit;
+BigInteger.prototype.addTo = bnpAddTo;
+BigInteger.prototype.dMultiply = bnpDMultiply;
+BigInteger.prototype.dAddOffset = bnpDAddOffset;
+BigInteger.prototype.multiplyLowerTo = bnpMultiplyLowerTo;
+BigInteger.prototype.multiplyUpperTo = bnpMultiplyUpperTo;
+BigInteger.prototype.modInt = bnpModInt;
+BigInteger.prototype.millerRabin = bnpMillerRabin;
+
+// public
+BigInteger.prototype.clone = bnClone;
+BigInteger.prototype.intValue = bnIntValue;
+BigInteger.prototype.byteValue = bnByteValue;
+BigInteger.prototype.shortValue = bnShortValue;
+BigInteger.prototype.signum = bnSigNum;
+BigInteger.prototype.toByteArray = bnToByteArray;
+BigInteger.prototype.equals = bnEquals;
+BigInteger.prototype.min = bnMin;
+BigInteger.prototype.max = bnMax;
+BigInteger.prototype.and = bnAnd;
+BigInteger.prototype.or = bnOr;
+BigInteger.prototype.xor = bnXor;
+BigInteger.prototype.andNot = bnAndNot;
+BigInteger.prototype.not = bnNot;
+BigInteger.prototype.shiftLeft = bnShiftLeft;
+BigInteger.prototype.shiftRight = bnShiftRight;
+BigInteger.prototype.getLowestSetBit = bnGetLowestSetBit;
+BigInteger.prototype.bitCount = bnBitCount;
+BigInteger.prototype.testBit = bnTestBit;
+BigInteger.prototype.setBit = bnSetBit;
+BigInteger.prototype.clearBit = bnClearBit;
+BigInteger.prototype.flipBit = bnFlipBit;
+BigInteger.prototype.add = bnAdd;
+BigInteger.prototype.subtract = bnSubtract;
+BigInteger.prototype.multiply = bnMultiply;
+BigInteger.prototype.divide = bnDivide;
+BigInteger.prototype.remainder = bnRemainder;
+BigInteger.prototype.divideAndRemainder = bnDivideAndRemainder;
+BigInteger.prototype.modPow = bnModPow;
+BigInteger.prototype.modInverse = bnModInverse;
+BigInteger.prototype.pow = bnPow;
+BigInteger.prototype.gcd = bnGCD;
+BigInteger.prototype.isProbablePrime = bnIsProbablePrime;
+
+// JSBN-specific extension
+BigInteger.prototype.square = bnSquare;
+
+BigInteger.prototype.toDouble = bnToDouble;
+
+// BigInteger interfaces not implemented in jsbn:
+
+// BigInteger(int signum, byte[] magnitude)
+// double doubleValue()
+// float floatValue()
+// int hashCode()
+// long longValue()
+// static BigInteger valueOf(long val)
+function bnBigIntegerFromInt(intValue) {
+  return new BigInteger(intValue.toString(), 10);
+}
+
+var bnBigInteger = BigInteger;
+
+if (typeof module !== 'undefined' && module.exports)
+{
+  module.exports = {
+    BigIntegerFromInt: bnBigIntegerFromInt,
+    BigInteger: bnBigInteger
+  };
+}
 // Generated by CoffeeScript 1.12.7
 (function() {
-  var BITS_MASK, BITS_SHIFT, BIT_IS_LINEAR, BIT_IS_PRIMARY, CLOCKWISE, COUNTERCLOCKWISE, DOWN, EAST, EPSILON, FORWARD, GEOMETRY_CATEGORY_POINT, GEOMETRY_CATEGORY_SEGMENT, HIGH, HORIZONTAL, IS_INVERSE, LEFT, LOW, NEGATIVE, NORTH, POSITIVE, PROXIMAL, REVERSE, RIGHT, SOURCE_CATEGORY_BITMASK, SOURCE_CATEGORY_GEOMETRY_SHIFT, SOURCE_CATEGORY_INITIAL_SEGMENT, SOURCE_CATEGORY_REVERSE_SEGMENT, SOURCE_CATEGORY_SEGMENT_END_POINT, SOURCE_CATEGORY_SEGMENT_START_POINT, SOURCE_CATEGORY_SINGLE_POINT, SOUTH, UP, VERTICAL, WEST, abstract_priority_queue, array_strategy, beach_line_node_data, beach_line_node_key, belongs, binarySearchForIndexReversed, circle_event, circle_existence_predicate, circle_formation_functor, circle_formation_predicate, clockwise_winding, construct_voronoi, counterclockwise_winding, cppgen, direction_1d, direction_2d, direction_3d, distance_predicate, event_comparison_predicate, fast_ps, find_distance_to_point_arc, find_distance_to_segment_arc, get_sqrt, insert, is_neg, is_pos, is_vertical, is_zero, kPredicateResult, lazy_circle_formation_functor, list, list_item, node_comparison_predicate, ordered_map, ordered_map_item, ordered_queue, orientation_2d, orientation_3d, ot, point_2d, point_comparison_predicate, point_data, pp, priority_queue, ps, ref, ref1, ref2, ref3, ref4, ref5, ref6, ref7, ref8, ref9, robust_cross_product, segment_data, site_event, sqrt_expr_, sqrt_expr_evaluator_pss3, sqrt_expr_evaluator_pss4, sqrt_expr_evaluator_pss4_temp, ss, static_cast_big_int, static_cast_int, unknown_winding, vertex_equality_predicate_, voronoi_builder, voronoi_cell, voronoi_diagnostics, voronoi_diagram, voronoi_edge, voronoi_vertex, voronoi_visual_utils,
+  var BITS_MASK, BITS_SHIFT, BIT_IS_LINEAR, BIT_IS_PRIMARY, BigInteger, BigIntegerFromInt, CLOCKWISE, COUNTERCLOCKWISE, DISABLE_REQUIRE, DOWN, EAST, EPSILON, FORWARD, GEOMETRY_CATEGORY_POINT, GEOMETRY_CATEGORY_SEGMENT, HIGH, HORIZONTAL, IS_INVERSE, LEFT, LOW, NEGATIVE, NORTH, POSITIVE, PROXIMAL, REVERSE, RIGHT, SOURCE_CATEGORY_BITMASK, SOURCE_CATEGORY_GEOMETRY_SHIFT, SOURCE_CATEGORY_INITIAL_SEGMENT, SOURCE_CATEGORY_REVERSE_SEGMENT, SOURCE_CATEGORY_SEGMENT_END_POINT, SOURCE_CATEGORY_SEGMENT_START_POINT, SOURCE_CATEGORY_SINGLE_POINT, SOUTH, UP, VERTICAL, WEST, abstract_priority_queue, array_strategy, beach_line_node_data, beach_line_node_key, belongs, binarySearchForIndexReversed, circle_event, circle_existence_predicate, circle_formation_functor, circle_formation_predicate, clockwise_winding, construct_voronoi, counterclockwise_winding, cppgen, direction_1d, direction_2d, direction_3d, distance_predicate, event_comparison_predicate, fast_ps, find_distance_to_point_arc, find_distance_to_segment_arc, get_sqrt, insert, is_neg, is_neg_big, is_pos, is_pos_big, is_vertical, is_zero, is_zero_big, kPredicateResult, lazy_circle_formation_functor, list, list_item, node_comparison_predicate, ordered_map, ordered_map_item, ordered_queue, orientation_2d, orientation_3d, ot, point_2d, point_comparison_predicate, point_data, pp, priority_queue, ps, ref, ref1, ref10, ref2, ref3, ref4, ref5, ref6, ref7, ref8, ref9, robust_cross_product, segment_data, site_event, sqrt_expr_, sqrt_expr_big_, sqrt_expr_evaluator_pss3, sqrt_expr_evaluator_pss3_big, sqrt_expr_evaluator_pss4, sqrt_expr_evaluator_pss4_big, sqrt_expr_evaluator_pss4_temp, ss, static_cast_big_int, static_cast_int, unknown_winding, vertex_equality_predicate_, voronoi_builder, voronoi_cell, voronoi_diagnostics, voronoi_diagram, voronoi_edge, voronoi_vertex, voronoi_visual_utils,
     extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
     hasProp = {}.hasOwnProperty;
+
+  DISABLE_REQUIRE = 1;
 
   EPSILON = 1e-5;
 
@@ -168,7 +1451,7 @@ DEALINGS IN THE SOFTWARE.
     };
   }
 
-  if (typeof require !== "undefined" && require !== null) {
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
     ref = require('./constants'), LOW = ref.LOW, HORIZONTAL = ref.HORIZONTAL, WEST = ref.WEST;
   }
 
@@ -670,7 +1953,13 @@ DEALINGS IN THE SOFTWARE.
     };
 
     list.prototype.jsSort = function(comparator) {
-      var arr, i, l, node, nodeComparator, ref1, results;
+      var arr, curr, i, l, node, nodeComparator, prev, ref1;
+      if (this._first == null) {
+        return;
+      }
+      if (this._first.next() == null) {
+        return;
+      }
       nodeComparator = function(n1, n2) {
         if (comparator(n1.value(), n2.value())) {
           return -1;
@@ -680,50 +1969,32 @@ DEALINGS IN THE SOFTWARE.
       };
       arr = [];
       node = this.begin();
-      while (node != null) {
-        if (node.value() != null) {
-          arr.push(node);
-        }
+      while (node !== this.end()) {
+        arr.push(node);
         node = node.next();
       }
       arr.sort(nodeComparator);
       this._first = arr[0];
-      this._last = arr[arr.length - 1];
-      if (this._first != null) {
-        this._first.prev(null);
+      prev = arr[0];
+      curr = arr[0];
+      for (i = l = 1, ref1 = arr.length; 1 <= ref1 ? l < ref1 : l > ref1; i = 1 <= ref1 ? ++l : --l) {
+        curr = arr[i];
+        prev._next = curr;
+        curr._prev = prev;
+        prev = curr;
       }
-      if (this._last != null) {
-        this._last.next(null);
-      }
-      if (arr.length > 0) {
-        results = [];
-        for (i = l = 0, ref1 = arr.length - 1; 0 <= ref1 ? l <= ref1 : l >= ref1; i = 0 <= ref1 ? ++l : --l) {
-          arr[i].next(arr[i + 1]);
-          if (arr[i + 1] != null) {
-            results.push(arr[i + 1].prev(arr[i]));
-          } else {
-            results.push(void 0);
-          }
-        }
-        return results;
-      }
+      curr._next = this._last;
+      this._last._prev = curr;
     };
 
     list.prototype.print = function() {
       var a, str;
       a = this.begin();
-      str = "as is: [";
+      str = "[";
       while (a !== this.end()) {
-        str += a.value();
+        str += JSON.stringify(a.value());
         a = a.next();
-        str += a !== this.end() ? ", " : "";
-      }
-      str += "] reverse: [";
-      a = this.end().prev();
-      while (a != null) {
-        str += a.value();
-        a = a.prev();
-        str += a != null ? ", " : "";
+        str += a !== this.end() ? ", \n" : "\n";
       }
       str += "]";
       console.log(str);
@@ -761,6 +2032,29 @@ DEALINGS IN THE SOFTWARE.
         curr = curr.prev();
       }
       return newList2;
+    };
+
+    list.prototype.uniqueWithTieBreaker = function(equalsCheck, tieBreaker) {
+      var curr, currValue, equalItems, returnList;
+      if (this._length === 0) {
+        return null;
+      }
+      returnList = new list();
+      currValue = this._first.value();
+      equalItems = [this._first.value()];
+      curr = this._first.next();
+      while (curr !== this._last) {
+        if (equalsCheck(currValue, curr.value())) {
+          equalItems.push(curr.value());
+        } else {
+          returnList.push(equalItems.sort(tieBreaker)[0]);
+          currValue = curr.value();
+          equalItems = [currValue];
+        }
+        curr = curr.next();
+      }
+      returnList.push(equalItems.sort(tieBreaker)[0]);
+      return returnList;
     };
 
     list.prototype.clear = function() {
@@ -1439,10 +2733,14 @@ DEALINGS IN THE SOFTWARE.
     };
   }
 
-  if (typeof require !== "undefined" && require !== null) {
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
     EPSILON = require('./constants').EPSILON;
     ref1 = require('./voronoi_structures'), site_event = ref1.site_event, circle_event = ref1.circle_event, point_2d = ref1.point_2d;
     ref2 = require('./voronoi_ctypes'), is_zero = ref2.is_zero, is_neg = ref2.is_neg, is_pos = ref2.is_pos;
+    ref3 = require('../thirdparty/jsbn'), BigIntegerFromInt = ref3.BigIntegerFromInt, BigInteger = ref3.BigInteger;
+  } else {
+    BigInteger = bnBigInteger;
+    BigIntegerFromInt = bnBigIntegerFromInt;
   }
 
   static_cast_int = function(num) {
@@ -1454,6 +2752,18 @@ DEALINGS IN THE SOFTWARE.
 
   static_cast_big_int = function(num) {
     return static_cast_int(num);
+  };
+
+  is_zero_big = function(num) {
+    return num.compareTo(BigInteger.ZERO) === 0;
+  };
+
+  is_pos_big = function(num) {
+    return num.compareTo(BigInteger.ZERO) > 0;
+  };
+
+  is_neg_big = function(num) {
+    return num.compareTo(BigInteger.ZERO) < 0;
   };
 
   get_sqrt = Math.sqrt;
@@ -1565,7 +2875,7 @@ DEALINGS IN THE SOFTWARE.
        */
     } else if (lhs.eventType() === 'circle_event' && rhs.eventType() === 'circle_event') {
       if (Math.abs(lhs.lower_x() - rhs.lower_x()) > EPSILON) {
-        return lhs.lower_x() < rhs.lower_x() && Math.abs(lhs.lower_x() - rhs.lower_x()) > EPSILON;
+        return lhs.lower_x() < rhs.lower_x();
       }
       return lhs.y() < rhs.y() && Math.abs(lhs.y() - rhs.y()) > EPSILON;
     } else {
@@ -1915,6 +3225,74 @@ DEALINGS IN THE SOFTWARE.
     }
   };
 
+  sqrt_expr_big_ = {
+    eval1: function(A, B) {
+      var a, afpt, b, bfpt;
+      a = A;
+      b = B;
+      if (A instanceof Array) {
+        a = A[0];
+        b = B[0];
+      }
+      afpt = a.toDouble();
+      bfpt = b.toDouble();
+      return afpt * Math.sqrt(bfpt);
+    },
+    eval2: function(A0, B0, A1, B1) {
+      var a, b;
+      if (A0 instanceof Array) {
+        return sqrt_expr_big_.eval2(A0[0], B0[0], A0[1], B0[1]);
+      } else {
+        a = sqrt_expr_big_.eval1(A0, B0);
+        b = sqrt_expr_big_.eval1(A1, B1);
+        if ((!is_neg(a) && !is_neg(b)) || (!is_pos(a) && !is_pos(b))) {
+          return a + b;
+        }
+      }
+      return ((A0.multiply(A0).multiply(B0)).subtract(A1.multiply(A1).multiply(B1))).toDouble() / (a - b);
+    },
+    eval3: function(A0, B0, A1, B1, A2, B2) {
+      var a, b, tA, tB;
+      if (A0 instanceof Array) {
+        return sqrt_expr_big_.eval3(A0[0], B0[0], A0[1], B0[1], A0[2], B0[2]);
+      } else {
+        a = sqrt_expr_big_.eval2(A0, B0, A1, B1);
+        b = sqrt_expr_big_.eval1(A2, B2);
+        if ((!is_neg(a) && !is_neg(b)) || (!is_pos(a) && !is_pos(b))) {
+          return a + b;
+        }
+        tA = [];
+        tB = [];
+        tA[0] = (A0.multiply(A0).multiply(B0)).add(A1.multiply(A1).multiply(B1)).subtract(A2.multiply(A2).multiply(B2));
+        tB[0] = BigIntegerFromInt(1);
+        tA[1] = A0.multiply(A1).multiply(BigIntegerFromInt(2));
+        tB[1] = B0.multiply(B1);
+        return sqrt_expr_big_.eval2(tA, tB) / (a - b);
+      }
+    },
+    eval4: function(A0, B0, A1, B1, A2, B2, A3, B3) {
+      var a, b, tA, tB;
+      if (A0 instanceof Array) {
+        return sqrt_expr_big_.eval4(A0[0], B0[0], A0[1], B0[1], A0[2], B0[2], A0[3], B0[3]);
+      } else {
+        a = sqrt_expr_big_.eval2(A0, B0, A1, B1);
+        b = sqrt_expr_big_.eval2(A2, B2, A3, B3);
+        if ((!is_neg(a) && !is_neg(b)) || (!is_pos(a) && !is_pos(b))) {
+          return a + b;
+        }
+        tA = [];
+        tB = [];
+        tA[0] = (A0.multiply(A0).multiply(B0)).add(A1.multiply(A1).multiply(B1)).subtract(A2.multiply(A2).multiply(B2)).subtract(A3.multiply(A3).multiply(B3));
+        tB[0] = BigIntegerFromInt(1);
+        tA[1] = A0.multiply(A1).multiply(BigIntegerFromInt(2));
+        tB[1] = B0.multiply(B1);
+        tA[2] = A2.multiply(A3).multiply(BigIntegerFromInt(-2));
+        tB[2] = B2.multiply(B3);
+        return sqrt_expr_big_.eval3(tA, tB) / (a - b);
+      }
+    }
+  };
+
   sqrt_expr_evaluator_pss4 = function(A, B) {
     throw new Error("sqrt_expr_evaluator_pss4 should never be called");
   };
@@ -1923,8 +3301,70 @@ DEALINGS IN THE SOFTWARE.
     return A[3] + A[0] * Math.sqrt(B[0]) + A[1] * Math.sqrt(B[1]) + A[2] * Math.sqrt(B[3] * (Math.sqrt(B[0] * B[1]) + B[2]));
   };
 
+  sqrt_expr_evaluator_pss4_big = function(A, B) {
+    var cA, cB, lh, numer, rh;
+    cA = [];
+    cB = [];
+    if (is_zero_big(A[3])) {
+      lh = sqrt_expr_big_.eval2(A, B);
+      cA[0] = BigIntegerFromInt(1);
+      cB[0] = B[0].multiply(B[1]);
+      cA[1] = B[2];
+      cB[1] = BigIntegerFromInt(1);
+      rh = sqrt_expr_big_.eval1(A[2], B[3]) * get_sqrt(sqrt_expr_big_.eval2(cA, cB));
+      if ((!is_neg(lh) && !is_neg(rh)) || (!is_pos(lh) && !is_pos(rh))) {
+        return lh + rh;
+      }
+      cA[0] = ((A[0].multiply(A[0]).multiply(B[0])).add(A[1].multiply(A[1]).multiply(B[1]))).subtract(A[2].multiply(A[2]).multiply(B[3]).multiply(B[2]));
+      cB[0] = BigIntegerFromInt(1);
+      cA[1] = (A[0].multiply(A[1]).multiply(BigIntegerFromInt(2))).subtract(A[2].multiply(A[2]).multiply(B[3]));
+      cB[1] = B[0].multiply(B[1]);
+      numer = sqrt_expr_big_.eval2(cA, cB);
+      return numer / (lh - rh);
+    }
+    cA[0] = BigIntegerFromInt(1);
+    cB[0] = B[0].multiply(B[1]);
+    cA[1] = B[2];
+    cB[1] = BigIntegerFromInt(1);
+    rh = sqrt_expr_big_.eval1(A[2], B[3]) * get_sqrt(sqrt_expr_big_.eval2(cA, cB));
+    cA[0] = A[0];
+    cB[0] = B[0];
+    cA[1] = A[1];
+    cB[1] = B[1];
+    cA[2] = A[3];
+    cB[2] = BigIntegerFromInt(1);
+    lh = sqrt_expr_big_.eval3(cA, cB);
+    if ((!is_neg(lh) && !is_neg(rh)) || (!is_pos(lh) && !is_pos(rh))) {
+      return lh + rh;
+    }
+    cA[0] = A[3].multiply(A[0]).multiply(BigIntegerFromInt(2));
+    cA[1] = A[3].multiply(A[1]).multiply(BigIntegerFromInt(2));
+    cA[2] = (A[0].multiply(A[0]).multiply(B[0])).add(A[1].multiply(A[1]).multiply(B[1])).add(A[3].multiply(A[3])).subtract(A[2].multiply(A[2]).multiply(B[2]).multiply(B[3]));
+    cA[3] = (A[0].multiply(A[1]).multiply(BigIntegerFromInt(2))).subtract(A[2].multiply(A[2]).multiply(B[3]));
+    cB[3] = B[0].multiply(B[1]);
+    numer = sqrt_expr_evaluator_pss3_big(cA, cB);
+    return numer / (lh - rh);
+  };
+
   sqrt_expr_evaluator_pss3 = function(A, B) {
     throw new Error("sqrt_expr_evaluator_pss3 should never be called");
+  };
+
+  sqrt_expr_evaluator_pss3_big = function(A, B) {
+    var cA, cB, lh, numer, rh;
+    cA = [];
+    cB = [];
+    lh = sqrt_expr_big_.eval2(A[0], B[0], A[1], B[1]);
+    rh = sqrt_expr_big_.eval2(A[2], B[2], A[3], B[3]);
+    if (((!is_neg(lh)) && (!is_neg(rh))) || ((!is_pos(lh)) && (!is_pos(rh)))) {
+      return lh + rh;
+    }
+    cA[0] = ((A[0].multiply(A[0]).multiply(B[0])).add(A[1].multiply(A[1]).multiply(B[1]))).subtract(A[2].multiply(A[2])).subtract(A[3].multiply(A[3]).multiply(B[0]).multiply(B[1]));
+    cB[0] = BigIntegerFromInt(1);
+    cA[1] = ((A[0].multiply(A[1])).subtract(A[2].multiply(A[3]))).multiply(BigIntegerFromInt(2));
+    cB[1] = B[3];
+    numer = sqrt_expr_big_.eval2(cA, cB);
+    return numer / (lh - rh);
   };
 
   circle_formation_functor = {
@@ -1943,27 +3383,27 @@ DEALINGS IN THE SOFTWARE.
       dif_y = [];
       sum_x = [];
       sum_y = [];
-      dif_x[0] = static_cast_int(site1.x()) - static_cast_int(site2.x());
-      dif_x[1] = static_cast_int(site2.x()) - static_cast_int(site3.x());
-      dif_x[2] = static_cast_int(site1.x()) - static_cast_int(site3.x());
-      dif_y[0] = static_cast_int(site1.y()) - static_cast_int(site2.y());
-      dif_y[1] = static_cast_int(site2.y()) - static_cast_int(site3.y());
-      dif_y[2] = static_cast_int(site1.y()) - static_cast_int(site3.y());
-      sum_x[0] = static_cast_int(site1.x()) + static_cast_int(site2.x());
-      sum_x[1] = static_cast_int(site2.x()) + static_cast_int(site3.x());
-      sum_y[0] = static_cast_int(site1.y()) + static_cast_int(site2.y());
-      sum_y[1] = static_cast_int(site2.y()) + static_cast_int(site3.y());
-      inv_denom = 0.5 / static_cast_big_int(dif_x[0] * dif_y[1] - dif_x[1] * dif_y[0]);
-      numer1 = dif_x[0] * sum_x[0] + dif_y[0] * sum_y[0];
-      numer2 = dif_x[1] * sum_x[1] + dif_y[1] * sum_y[1];
+      dif_x[0] = BigIntegerFromInt(static_cast_int(site1.x()) - static_cast_int(site2.x()));
+      dif_x[1] = BigIntegerFromInt(static_cast_int(site2.x()) - static_cast_int(site3.x()));
+      dif_x[2] = BigIntegerFromInt(static_cast_int(site1.x()) - static_cast_int(site3.x()));
+      dif_y[0] = BigIntegerFromInt(static_cast_int(site1.y()) - static_cast_int(site2.y()));
+      dif_y[1] = BigIntegerFromInt(static_cast_int(site2.y()) - static_cast_int(site3.y()));
+      dif_y[2] = BigIntegerFromInt(static_cast_int(site1.y()) - static_cast_int(site3.y()));
+      sum_x[0] = BigIntegerFromInt(static_cast_int(site1.x()) + static_cast_int(site2.x()));
+      sum_x[1] = BigIntegerFromInt(static_cast_int(site2.x()) + static_cast_int(site3.x()));
+      sum_y[0] = BigIntegerFromInt(static_cast_int(site1.y()) + static_cast_int(site2.y()));
+      sum_y[1] = BigIntegerFromInt(static_cast_int(site2.y()) + static_cast_int(site3.y()));
+      inv_denom = 0.5 / ((dif_x[0].multiply(dif_y[1])).subtract(dif_x[1].multiply(dif_y[0]))).toDouble();
+      numer1 = (dif_x[0].multiply(sum_x[0])).add(dif_y[0].multiply(sum_y[0]));
+      numer2 = (dif_x[1].multiply(sum_x[1])).add(dif_y[1].multiply(sum_y[1]));
       if (recompute_c_x || recompute_lower_x) {
-        c_x = numer1 * dif_y[1] - numer2 * dif_y[0];
-        circle.x(c_x * inv_denom);
+        c_x = (numer1.multiply(dif_y[1])).subtract(numer2.multiply(dif_y[0]));
+        circle.x(c_x.toDouble() * inv_denom);
         if (recompute_lower_x) {
 
           /*// Evaluate radius of the circle. */
-          sqr_r = (dif_x[0] * dif_x[0] + dif_y[0] * dif_y[0]) * (dif_x[1] * dif_x[1] + dif_y[1] * dif_y[1]) * (dif_x[2] * dif_x[2] + dif_y[2] * dif_y[2]);
-          r = get_sqrt(sqr_r);
+          sqr_r = ((dif_x[0].multiply(dif_x[0])).add(dif_y[0].multiply(dif_y[0]))).multiply((dif_x[1].multiply(dif_x[1])).add(dif_y[1].multiply(dif_y[1]))).multiply((dif_x[2].multiply(dif_x[2])).add(dif_y[2].multiply(dif_y[2])));
+          r = get_sqrt(sqr_r.toDouble());
 
           /*// If c_x >= 0 then lower_x = c_x + r,
           // else lower_x = (c_x * c_x - r * r) / (c_x - r).
@@ -1976,15 +3416,15 @@ DEALINGS IN THE SOFTWARE.
               circle.lower_x(circle.x() - r * inv_denom);
             }
           } else {
-            numer = c_x * c_x - sqr_r;
-            lower_x = numer * inv_denom / (c_x + r);
+            numer = (c_x.multiply(c_x)).subtract(sqr_r);
+            lower_x = numer.toDouble() * inv_denom / (c_x.toDouble() + r);
             circle.lower_x(lower_x);
           }
         }
       }
       if (recompute_c_y) {
-        c_y = numer2 * dif_x[0] - numer1 * dif_x[1];
-        circle.y(c_y * inv_denom);
+        c_y = (numer2.multiply(dif_x[0])).subtract(numer1.multiply(dif_x[1]));
+        circle.y(c_y.toDouble() * inv_denom);
       }
     },
 
@@ -2002,71 +3442,71 @@ DEALINGS IN THE SOFTWARE.
       }
       cA = [];
       cB = [];
-      line_a = static_cast_int(site3.y1()) - static_cast_int(site3.y0());
-      line_b = static_cast_int(site3.x0()) - static_cast_int(site3.x1());
-      segm_len = line_a * line_a + line_b * line_b;
-      vec_x = static_cast_int(site2.y()) - static_cast_int(site1.y());
-      vec_y = static_cast_int(site1.x()) - static_cast_int(site2.x());
-      sum_x = static_cast_int(site1.x()) + static_cast_int(site2.x());
-      sum_y = static_cast_int(site1.y()) + static_cast_int(site2.y());
-      teta = line_a * vec_x + line_b * vec_y;
-      denom = vec_x * line_b - vec_y * line_a;
-      dif0 = static_cast_int(site3.y1()) - static_cast_int(site1.y());
-      dif1 = static_cast_int(site1.x()) - static_cast_int(site3.x1());
-      A = line_a * dif1 - line_b * dif0;
-      dif0 = static_cast_int(site3.y1()) - static_cast_int(site2.y());
-      dif1 = static_cast_int(site2.x()) - static_cast_int(site3.x1());
-      B = line_a * dif1 - line_b * dif0;
-      sum_AB = A + B;
-      if (is_zero(denom)) {
-        numer = teta * teta - sum_AB * sum_AB;
-        denom = teta * sum_AB;
-        cA[0] = denom * sum_x * 2 + numer * vec_x;
+      line_a = BigIntegerFromInt(static_cast_int(site3.y1()) - static_cast_int(site3.y0()));
+      line_b = BigIntegerFromInt(static_cast_int(site3.x0()) - static_cast_int(site3.x1()));
+      segm_len = (line_a.multiply(line_a)).add(line_b.multiply(line_b));
+      vec_x = BigIntegerFromInt(static_cast_int(site2.y()) - static_cast_int(site1.y()));
+      vec_y = BigIntegerFromInt(static_cast_int(site1.x()) - static_cast_int(site2.x()));
+      sum_x = BigIntegerFromInt(static_cast_int(site1.x()) + static_cast_int(site2.x()));
+      sum_y = BigIntegerFromInt(static_cast_int(site1.y()) + static_cast_int(site2.y()));
+      teta = (line_a.multiply(vec_x)).add(line_b.multiply(vec_y));
+      denom = (vec_x.multiply(line_b)).subtract(vec_y.multiply(line_a));
+      dif0 = BigIntegerFromInt(static_cast_int(site3.y1()) - static_cast_int(site1.y()));
+      dif1 = BigIntegerFromInt(static_cast_int(site1.x()) - static_cast_int(site3.x1()));
+      A = (line_a.multiply(dif1)).subtract(line_b.multiply(dif0));
+      dif0 = BigIntegerFromInt(static_cast_int(site3.y1()) - static_cast_int(site2.y()));
+      dif1 = BigIntegerFromInt(static_cast_int(site2.x()) - static_cast_int(site3.x1()));
+      B = (line_a.multiply(dif1)).subtract(line_b.multiply(dif0));
+      sum_AB = A.add(B);
+      if (is_zero_big(denom)) {
+        numer = (teta.multiply(teta)).subtract(sum_AB.multiply(sum_AB));
+        denom = teta.multiply(sum_AB);
+        cA[0] = (denom.multiply(sum_x).multiply(BigIntegerFromInt(2))).add(numer.multiply(vec_x));
         cB[0] = segm_len;
-        cA[1] = denom * sum_AB * 2 + numer * teta;
-        cB[1] = 1;
-        cA[2] = denom * sum_y * 2 + numer * vec_y;
-        inv_denom = 1.0 / denom;
+        cA[1] = (denom.multiply(sum_AB).multiply(BigIntegerFromInt(2))).add(numer.multiply(teta));
+        cB[1] = BigIntegerFromInt(1);
+        cA[2] = (denom.multiply(sum_y).multiply(BigIntegerFromInt(2))).add(numer.multiply(vec_y));
+        inv_denom = 1.0 / denom.toDouble();
         if (recompute_c_x) {
-          c_event.x(0.25 * cA[0] * inv_denom);
+          c_event.x(0.25 * cA[0].toDouble() * inv_denom);
         }
         if (recompute_c_y) {
-          c_event.y(0.25 * cA[2] * inv_denom);
+          c_event.y(0.25 * cA[2].toDouble() * inv_denom);
         }
         if (recompute_lower_x) {
-          c_event.lower_x(0.25 * sqrt_expr_.eval2(cA, cB) * inv_denom / get_sqrt(segm_len));
+          c_event.lower_x(0.25 * sqrt_expr_big_.eval2(cA, cB) * inv_denom / get_sqrt(segm_len.toDouble()));
         }
         return;
       }
-      det = (teta * teta + denom * denom) * A * B * 4;
-      inv_denom_sqr = 1.0 / denom;
+      det = ((teta.multiply(teta)).add(denom.multiply(denom))).multiply(A).multiply(B).multiply(BigIntegerFromInt(4));
+      inv_denom_sqr = 1.0 / denom.toDouble();
       inv_denom_sqr *= inv_denom_sqr;
       if (recompute_c_x || recompute_lower_x) {
-        cA[0] = sum_x * denom * denom + teta * sum_AB * vec_x;
-        cB[0] = 1;
-        cA[1] = segment_index === 2 ? -vec_x : vec_x;
+        cA[0] = (sum_x.multiply(denom).multiply(denom)).add(teta.multiply(sum_AB).multiply(vec_x));
+        cB[0] = BigIntegerFromInt(1);
+        cA[1] = segment_index === 2 ? vec_x.negate() : vec_x;
         cB[1] = det;
         if (recompute_c_x) {
-          c_event.x(0.5 * sqrt_expr_.eval2(cA, cB) * inv_denom_sqr);
+          c_event.x(0.5 * sqrt_expr_big_.eval2(cA, cB) * inv_denom_sqr);
         }
       }
       if (recompute_c_y || recompute_lower_x) {
-        cA[2] = sum_y * denom * denom + teta * sum_AB * vec_y;
-        cB[2] = 1;
-        cA[3] = segment_index === 2 ? -vec_y : vec_y;
+        cA[2] = (sum_y.multiply(denom).multiply(denom)).add(teta.multiply(sum_AB).multiply(vec_y));
+        cB[2] = BigIntegerFromInt(1);
+        cA[3] = segment_index === 2 ? vec_y.negate() : vec_y;
         cB[3] = det;
         if (recompute_c_y) {
-          c_event.y(0.5 * sqrt_expr_.eval2(cA[2], cB[2], cA[3], cB[3]) * inv_denom_sqr);
+          c_event.y(0.5 * sqrt_expr_big_.eval2(cA[2], cB[2], cA[3], cB[3]) * inv_denom_sqr);
         }
       }
       if (recompute_lower_x) {
-        cB[0] = cB[0] * segm_len;
-        cB[1] = cB[1] * segm_len;
-        cA[2] = sum_AB * (denom * denom + teta * teta);
-        cB[2] = 1;
-        cA[3] = segment_index === 2 ? -teta : teta;
+        cB[0] = cB[0].multiply(segm_len);
+        cB[1] = cB[1].multiply(segm_len);
+        cA[2] = sum_AB.multiply((denom.multiply(denom)).add(teta.multiply(teta)));
+        cB[2] = BigIntegerFromInt(1);
+        cA[3] = segment_index === 2 ? teta.negate() : teta;
         cB[3] = det;
-        return c_event.lower_x(0.5 * sqrt_expr_.eval4(cA, cB) * inv_denom_sqr / get_sqrt(segm_len));
+        return c_event.lower_x(0.5 * sqrt_expr_big_.eval4(cA, cB) * inv_denom_sqr / get_sqrt(segm_len.toDouble()));
       }
     },
 
@@ -2091,85 +3531,85 @@ DEALINGS IN THE SOFTWARE.
       segm_end1 = site2.point0();
       segm_start2 = site3.point0();
       segm_end2 = site3.point1();
-      a[0] = static_cast_int(segm_end1.x()) - static_cast_int(segm_start1.x());
-      b[0] = static_cast_int(segm_end1.y()) - static_cast_int(segm_start1.y());
-      a[1] = static_cast_int(segm_end2.x()) - static_cast_int(segm_start2.x());
-      b[1] = static_cast_int(segm_end2.y()) - static_cast_int(segm_start2.y());
-      orientation = a[1] * b[0] - a[0] * b[1];
-      if (is_zero(orientation)) {
-        denom = 2.0 * static_cast_big_int(a[0] * a[0] + b[0] * b[0]);
-        c[0] = b[0] * (static_cast_int(segm_start2.x()) - static_cast_int(segm_start1.x())) - a[0] * (static_cast_int(segm_start2.y()) - static_cast_int(segm_start1.y()));
-        dx = a[0] * (static_cast_int(site1.y()) - static_cast_int(segm_start1.y())) - b[0] * (static_cast_int(site1.x()) - static_cast_int(segm_start1.x()));
-        dy = b[0] * (static_cast_int(site1.x()) - static_cast_int(segm_start2.x())) - a[0] * (static_cast_int(site1.y()) - static_cast_int(segm_start2.y()));
-        cB[0] = dx * dy;
-        cB[1] = 1;
+      a[0] = BigIntegerFromInt(static_cast_int(segm_end1.x()) - static_cast_int(segm_start1.x()));
+      b[0] = BigIntegerFromInt(static_cast_int(segm_end1.y()) - static_cast_int(segm_start1.y()));
+      a[1] = BigIntegerFromInt(static_cast_int(segm_end2.x()) - static_cast_int(segm_start2.x()));
+      b[1] = BigIntegerFromInt(static_cast_int(segm_end2.y()) - static_cast_int(segm_start2.y()));
+      orientation = (a[1].multiply(b[0])).subtract(a[0].multiply(b[1]));
+      if (is_zero_big(orientation)) {
+        denom = 2.0 * ((a[0].multiply(a[0])).add(b[0].multiply(b[0]))).toDouble();
+        c[0] = (b[0].multiply(BigIntegerFromInt(static_cast_int(segm_start2.x()) - static_cast_int(segm_start1.x())))).subtract(a[0].multiply(BigIntegerFromInt(static_cast_int(segm_start2.y()) - static_cast_int(segm_start1.y()))));
+        dx = (a[0].multiply(BigIntegerFromInt(static_cast_int(site1.y()) - static_cast_int(segm_start1.y())))).subtract(b[0].multiply(BigIntegerFromInt(static_cast_int(site1.x()) - static_cast_int(segm_start1.x()))));
+        dy = (b[0].multiply(BigIntegerFromInt(static_cast_int(site1.x()) - static_cast_int(segm_start2.x())))).subtract(a[0].multiply(BigIntegerFromInt(static_cast_int(site1.y()) - static_cast_int(segm_start2.y()))));
+        cB[0] = dx.multiply(dy);
+        cB[1] = BigIntegerFromInt(1);
         if (recompute_c_y) {
-          cA[0] = b[0] * (point_index === 2 ? 2 : -2);
-          cA[1] = a[0] * a[0] * (static_cast_int(segm_start1.y()) + static_cast_int(segm_start2.y())) - a[0] * b[0] * (static_cast_int(segm_start1.x()) + static_cast_int(segm_start2.x()) - static_cast_int(site1.x()) * 2) + b[0] * b[0] * (static_cast_int(site1.y()) * 2);
-          c_y = sqrt_expr_.eval2(cA, cB);
+          cA[0] = b[0].multiply(point_index === 2 ? BigIntegerFromInt(2) : BigIntegerFromInt(-2));
+          cA[1] = (a[0].multiply(a[0]).multiply(BigIntegerFromInt(static_cast_int(segm_start1.y()) + static_cast_int(segm_start2.y())))).subtract(a[0].multiply(b[0]).multiply(BigIntegerFromInt(static_cast_int(segm_start1.x()) + static_cast_int(segm_start2.x()) - static_cast_int(site1.x()) * 2))).add(b[0].multiply(b[0]).multiply(BigIntegerFromInt(static_cast_int(site1.y()) * 2)));
+          c_y = sqrt_expr_big_.eval2(cA, cB);
           c_event.y(c_y / denom);
         }
         if (recompute_c_x || recompute_lower_x) {
-          cA[0] = a[0] * (point_index === 2 ? 2 : -2);
-          cA[1] = b[0] * b[0] * (static_cast_int(segm_start1.x()) + static_cast_int(segm_start2.x())) - a[0] * b[0] * (static_cast_int(segm_start1.y()) + static_cast_int(segm_start2.y()) - static_cast_int(site1.y()) * 2) + a[0] * a[0] * (static_cast_int(site1.x()) * 2);
+          cA[0] = a[0].multiply(point_index === 2 ? BigIntegerFromInt(2) : BigIntegerFromInt(-2));
+          cA[1] = (b[0].multiply(b[0]).multiply(BigIntegerFromInt(static_cast_int(segm_start1.x()) + static_cast_int(segm_start2.x())))).subtract(a[0].multiply(b[0]).multiply(BigIntegerFromInt(static_cast_int(segm_start1.y()) + static_cast_int(segm_start2.y()) - static_cast_int(site1.y()) * 2))).add(a[0].multiply(a[0]).multiply(BigIntegerFromInt(static_cast_int(site1.x()) * 2)));
           if (recompute_c_x) {
-            c_x = sqrt_expr_.eval2(cA, cB);
+            c_x = sqrt_expr_big_.eval2(cA, cB);
             c_event.x(c_x / denom);
           }
           if (recompute_lower_x) {
-            cA[2] = is_neg(c[0]) ? -c[0] : c[0];
-            cB[2] = a[0] * a[0] + b[0] * b[0];
-            lower_x = sqrt_expr_.eval3(cA, cB);
+            cA[2] = is_neg_big(c[0]) ? c[0].negate() : c[0];
+            cB[2] = (a[0].multiply(a[0])).add(b[0].multiply(b[0]));
+            lower_x = sqrt_expr_big_.eval3(cA, cB);
             c_event.lower_x(lower_x / denom);
           }
         }
         return;
       }
-      c[0] = b[0] * segm_end1.x() - a[0] * segm_end1.y();
-      c[1] = a[1] * segm_end2.y() - b[1] * segm_end2.x();
-      ix = a[0] * c[1] + a[1] * c[0];
-      iy = b[0] * c[1] + b[1] * c[0];
-      dx = ix - orientation * site1.x();
-      dy = iy - orientation * site1.y();
-      if (is_zero(dx) && is_zero(dy)) {
-        denom = orientation;
-        c_x = ix / denom;
-        c_y = iy / denom;
+      c[0] = (b[0].multiply(BigIntegerFromInt(segm_end1.x()))).subtract(a[0].multiply(BigIntegerFromInt(segm_end1.y())));
+      c[1] = (a[1].multiply(BigIntegerFromInt(segm_end2.y()))).subtract(b[1].multiply(BigIntegerFromInt(segm_end2.x())));
+      ix = (a[0].multiply(c[1])).add(a[1].multiply(c[0]));
+      iy = (b[0].multiply(c[1])).add(b[1].multiply(c[0]));
+      dx = ix.subtract(orientation.multiply(BigIntegerFromInt(site1.x())));
+      dy = iy.subtract(orientation.multiply(BigIntegerFromInt(site1.y())));
+      if (is_zero_big(dx) && is_zero_big(dy)) {
+        denom = orientation.toDouble();
+        c_x = ix.toDouble() / denom;
+        c_y = iy.toDouble() / denom;
         c_event.x(c_x);
         c_event.y(c_y);
         c_event.lower_x(c_x);
         return;
       }
-      sign = (point_index === 2 ? 1 : -1) * (is_neg(orientation) ? 1 : -1);
-      cA[0] = a[1] * -dx + b[1] * -dy;
-      cA[1] = a[0] * -dx + b[0] * -dy;
+      sign = BigIntegerFromInt((point_index === 2 ? 1 : -1) * (is_neg_big(orientation) ? 1 : -1));
+      cA[0] = (a[1].multiply(dx.negate())).add(b[1].multiply(dy.negate()));
+      cA[1] = (a[0].multiply(dx.negate())).add(b[0].multiply(dy.negate()));
       cA[2] = sign;
-      cA[3] = 0;
-      cB[0] = a[0] * a[0] + b[0] * b[0];
-      cB[1] = a[1] * a[1] + b[1] * b[1];
-      cB[2] = a[0] * a[1] + b[0] * b[1];
-      cB[3] = (a[0] * dy - b[0] * dx) * (a[1] * dy - b[1] * dx) * -2;
-      temp = sqrt_expr_evaluator_pss4_temp(cA, cB);
-      denom = temp * orientation;
+      cA[3] = BigIntegerFromInt(0);
+      cB[0] = (a[0].multiply(a[0])).add(b[0].multiply(b[0]));
+      cB[1] = (a[1].multiply(a[1])).add(b[1].multiply(b[1]));
+      cB[2] = (a[0].multiply(a[1])).add(b[0].multiply(b[1]));
+      cB[3] = ((a[0].multiply(dy)).subtract(b[0].multiply(dx))).multiply((a[1].multiply(dy)).subtract(b[1].multiply(dx))).multiply(BigIntegerFromInt(-2));
+      temp = sqrt_expr_evaluator_pss4_big(cA, cB);
+      denom = temp * orientation.toDouble();
       if (recompute_c_y) {
-        cA[0] = b[1] * (dx * dx + dy * dy) - iy * (dx * a[1] + dy * b[1]);
-        cA[1] = b[0] * (dx * dx + dy * dy) - iy * (dx * a[0] + dy * b[0]);
-        cA[2] = iy * sign;
-        cy = sqrt_expr_evaluator_pss4_temp(cA, cB);
+        cA[0] = (b[1].multiply((dx.multiply(dx)).add(dy.multiply(dy)))).subtract(iy.multiply((dx.multiply(a[1])).add(dy.multiply(b[1]))));
+        cA[1] = (b[0].multiply((dx.multiply(dx)).add(dy.multiply(dy)))).subtract(iy.multiply((dx.multiply(a[0])).add(dy.multiply(b[0]))));
+        cA[2] = iy.multiply(sign);
+        cy = sqrt_expr_evaluator_pss4_big(cA, cB);
         c_event.y(cy / denom);
       }
       if (recompute_c_x || recompute_lower_x) {
-        cA[0] = a[1] * (dx * dx + dy * dy) - ix * (dx * a[1] + dy * b[1]);
-        cA[1] = a[0] * (dx * dx + dy * dy) - ix * (dx * a[0] + dy * b[0]);
-        cA[2] = ix * sign;
+        cA[0] = (a[1].multiply((dx.multiply(dx)).add(dy.multiply(dy)))).subtract(ix.multiply((dx.multiply(a[1])).add(dy.multiply(b[1]))));
+        cA[1] = (a[0].multiply((dx.multiply(dx)).add(dy.multiply(dy)))).subtract(ix.multiply((dx.multiply(a[0])).add(dy.multiply(b[0]))));
+        cA[2] = ix.multiply(sign);
         if (recompute_c_x) {
-          cx = sqrt_expr_evaluator_pss4_temp(cA, cB);
+          cx = sqrt_expr_evaluator_pss4_big(cA, cB);
           c_event.x(cx / denom);
         }
         if (recompute_lower_x) {
-          cA[3] = orientation * (dx * dx + dy * dy) * (is_neg(temp) ? -1 : 1);
-          lower_x = sqrt_expr_evaluator_pss4_temp(cA, cB);
-          return c_event.lower_x(lower_x / denom);
+          cA[3] = orientation.multiply((dx.multiply(dx)).add(dy.multiply(dy))).multiply(is_neg(temp) ? BigIntegerFromInt(-1) : BigIntegerFromInt(1));
+          lower_x = sqrt_expr_evaluator_pss4_big(cA, cB);
+          c_event.lower_x(lower_x / denom);
         }
       }
     },
@@ -2196,51 +3636,51 @@ DEALINGS IN THE SOFTWARE.
       // cA - corresponds to the cross product.
       // cB - corresponds to the squared length.
        */
-      a[0] = static_cast_int(site1.x1()) - static_cast_int(site1.x0());
-      a[1] = static_cast_int(site2.x1()) - static_cast_int(site2.x0());
-      a[2] = static_cast_int(site3.x1()) - static_cast_int(site3.x0());
-      b[0] = static_cast_int(site1.y1()) - static_cast_int(site1.y0());
-      b[1] = static_cast_int(site2.y1()) - static_cast_int(site2.y0());
-      b[2] = static_cast_int(site3.y1()) - static_cast_int(site3.y0());
-      c[0] = static_cast_int(site1.x0()) * static_cast_int(site1.y1()) - static_cast_int(site1.y0()) * static_cast_int(site1.x1());
-      c[1] = static_cast_int(site2.x0()) * static_cast_int(site2.y1()) - static_cast_int(site2.y0()) * static_cast_int(site2.x1());
-      c[2] = static_cast_int(site3.x0()) * static_cast_int(site3.y1()) - static_cast_int(site3.y0()) * static_cast_int(site3.x1());
+      a[0] = BigIntegerFromInt(static_cast_int(site1.x1()) - static_cast_int(site1.x0()));
+      a[1] = BigIntegerFromInt(static_cast_int(site2.x1()) - static_cast_int(site2.x0()));
+      a[2] = BigIntegerFromInt(static_cast_int(site3.x1()) - static_cast_int(site3.x0()));
+      b[0] = BigIntegerFromInt(static_cast_int(site1.y1()) - static_cast_int(site1.y0()));
+      b[1] = BigIntegerFromInt(static_cast_int(site2.y1()) - static_cast_int(site2.y0()));
+      b[2] = BigIntegerFromInt(static_cast_int(site3.y1()) - static_cast_int(site3.y0()));
+      c[0] = BigIntegerFromInt(static_cast_int(site1.x0()) * static_cast_int(site1.y1()) - static_cast_int(site1.y0()) * static_cast_int(site1.x1()));
+      c[1] = BigIntegerFromInt(static_cast_int(site2.x0()) * static_cast_int(site2.y1()) - static_cast_int(site2.y0()) * static_cast_int(site2.x1()));
+      c[2] = BigIntegerFromInt(static_cast_int(site3.x0()) * static_cast_int(site3.y1()) - static_cast_int(site3.y0()) * static_cast_int(site3.x1()));
       for (i = l = 0; l < 3; i = ++l) {
-        cB[i] = a[i] * a[i] + b[i] * b[i];
+        cB[i] = (a[i].multiply(a[i])).add(b[i].multiply(b[i]));
       }
       for (i = m = 0; m < 3; i = ++m) {
         j = (i + 1) % 3;
         k = (i + 2) % 3;
-        cA[i] = a[j] * b[k] - a[k] * b[j];
+        cA[i] = (a[j].multiply(b[k])).subtract(a[k].multiply(b[j]));
       }
-      denom = sqrt_expr_.eval3(cA, cB);
+      denom = sqrt_expr_big_.eval3(cA, cB);
       if (recompute_c_y) {
         for (i = n = 0; n < 3; i = ++n) {
           j = (i + 1) % 3;
           k = (i + 2) % 3;
-          cA[i] = b[j] * c[k] - b[k] * c[j];
+          cA[i] = (b[j].multiply(c[k])).subtract(b[k].multiply(c[j]));
         }
-        c_y = sqrt_expr_.eval3(cA, cB);
+        c_y = sqrt_expr_big_.eval3(cA, cB);
         c_event.y(c_y / denom);
       }
       if (recompute_c_x || recompute_lower_x) {
-        cA[3] = 0;
+        cA[3] = BigIntegerFromInt(0);
         for (i = o = 0; o < 3; i = ++o) {
           j = (i + 1) % 3;
           k = (i + 2) % 3;
-          cA[i] = a[j] * c[k] - a[k] * c[j];
+          cA[i] = (a[j].multiply(c[k])).subtract(a[k].multiply(c[j]));
           if (recompute_lower_x) {
-            cA[3] = cA[3] + cA[i] * b[i];
+            cA[3] = cA[3].add(cA[i].multiply(b[i]));
           }
         }
         if (recompute_c_x) {
-          c_x = sqrt_expr_.eval3(cA, cB);
+          c_x = sqrt_expr_big_.eval3(cA, cB);
           c_event.x(c_x / denom);
         }
         if (recompute_lower_x) {
-          cB[3] = 1;
-          lower_x = sqrt_expr_.eval4(cA, cB);
-          return c_event.lower_x(lower_x / denom);
+          cB[3] = BigIntegerFromInt(1);
+          lower_x = sqrt_expr_big_.eval4(cA, cB);
+          c_event.lower_x(lower_x / denom);
         }
       }
     }
@@ -2342,8 +3782,8 @@ DEALINGS IN THE SOFTWARE.
     };
   }
 
-  if (typeof require !== "undefined" && require !== null) {
-    ref3 = require('./constants'), EPSILON = ref3.EPSILON, SOURCE_CATEGORY_BITMASK = ref3.SOURCE_CATEGORY_BITMASK, IS_INVERSE = ref3.IS_INVERSE;
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
+    ref4 = require('./constants'), EPSILON = ref4.EPSILON, SOURCE_CATEGORY_BITMASK = ref4.SOURCE_CATEGORY_BITMASK, IS_INVERSE = ref4.IS_INVERSE;
   }
 
 
@@ -2382,6 +3822,13 @@ DEALINGS IN THE SOFTWARE.
 
     point_2d.prototype.print = function() {
       return "(" + this.x_ + ", " + this.y_ + ")";
+    };
+
+    point_2d.prototype.to_json = function() {
+      return {
+        x: this.x_,
+        y: this.y_
+      };
     };
 
     point_2d.prototype.x = function() {
@@ -2651,15 +4098,15 @@ DEALINGS IN THE SOFTWARE.
     };
 
     circle_event.prototype.print = function() {
-      return "circle_event { c_x: " + this.center_x_ + " c_y: " + this.center_y_ + " lower_x: " + this.lower_x_ + " is_active: " + this.is_active_ + " }";
+      return "circle_event { c_x: " + this.center_x_ + " c_y: " + this.center_y_ + " lower_x: " + this.lower_x_ + " is_active: " + (this.is_active_ ? 1 : 0 + " }");
     };
 
     circle_event.prototype.to_json = function() {
       return {
-        c_x: this.center_x_,
-        c_y: this.center_y_,
-        lower_x_: this.lower_x_,
-        is_active_: this.is_active_
+        c_x: parseFloat(this.center_x_.toFixed(6)),
+        c_y: parseFloat(this.center_y_.toFixed(6)),
+        lower_x: parseFloat(this.lower_x_.toFixed(6)),
+        is_active: this.is_active_ ? 1 : 0
       };
     };
 
@@ -2765,7 +4212,7 @@ DEALINGS IN THE SOFTWARE.
     beach_line_node_data.prototype.to_json = function() {
       return {
         circle_event: (this.circle_event_ !== null) ? this.circle_event_.to_json() : null,
-        edge: "TODO"
+        edge: (this.edge_ !== null) ? this.edge_.to_json() : null
       };
     };
 
@@ -2783,8 +4230,8 @@ DEALINGS IN THE SOFTWARE.
     };
   }
 
-  if (typeof require !== "undefined" && require !== null) {
-    ref4 = require('./constants'), BIT_IS_LINEAR = ref4.BIT_IS_LINEAR, BIT_IS_PRIMARY = ref4.BIT_IS_PRIMARY, EPSILON = ref4.EPSILON, BITS_SHIFT = ref4.BITS_SHIFT;
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
+    ref5 = require('./constants'), BIT_IS_LINEAR = ref5.BIT_IS_LINEAR, BIT_IS_PRIMARY = ref5.BIT_IS_PRIMARY, EPSILON = ref5.EPSILON, BITS_SHIFT = ref5.BITS_SHIFT;
   }
 
 
@@ -2912,6 +4359,13 @@ DEALINGS IN THE SOFTWARE.
         return;
       }
       return this.color_ >> BITS_SHIFT;
+    };
+
+    voronoi_vertex.prototype.to_json = function() {
+      return {
+        x: parseFloat(this.x_.toFixed(6)),
+        y: parseFloat(this.y_.toFixed(6))
+      };
     };
 
     return voronoi_vertex;
@@ -3100,6 +4554,23 @@ DEALINGS IN THE SOFTWARE.
       }
     };
 
+    voronoi_edge.prototype.to_json = function() {
+      return {
+        is_finite: this.is_finite(),
+        is_linear: this.is_linear(),
+        is_primary: this.is_primary(),
+        color: this.color(),
+        vertex0: this.vertex0() === null ? null : {
+          x: parseFloat(this.vertex0().x().toFixed(6)),
+          y: parseFloat(this.vertex0().y().toFixed(6))
+        },
+        vertex1: this.vertex1() === null ? null : {
+          x: parseFloat(this.vertex1().x().toFixed(6)),
+          y: parseFloat(this.vertex1().y().toFixed(6))
+        }
+      };
+    };
+
     return voronoi_edge;
 
   })();
@@ -3271,16 +4742,17 @@ DEALINGS IN THE SOFTWARE.
     };
 
     voronoi_diagram.prototype._build = function() {
-      var cell, e, e1, e2, edge, edge1, edge2, edge_it, it, l, last_edge, last_vertex, left_edge, len, len1, m, n, o, ref5, ref6, ref7, ref8, results, right_edge, v, v1, v2;
+      var cell, e, e1, e2, edge, edge1, edge2, edge_it, it, l, last_edge, last_vertex, left_edge, len, len1, m, n, o, ref6, ref7, ref8, ref9, results, right_edge, v, v1, v2;
       last_edge = 0;
-      for (it = l = 0, ref5 = this.edges_.length; l < ref5; it = l += 2) {
+      for (it = l = 0, ref6 = this.edges_.length; l < ref6; it = l += 2) {
         v1 = this.edges_[it].vertex0();
         v2 = this.edges_[it].vertex1();
         if ((v1 != null) && (v2 != null) && vertex_equality_predicate_(v1, v2)) {
           this.remove_edge(this.edges_[it]);
         } else {
           if (it !== last_edge) {
-            last_edge = it;
+            this.edges_[last_edge] = this.edges_[it];
+            this.edges_[last_edge + 1] = this.edges_[it + 1];
             e1 = this.edges_[last_edge];
             e2 = this.edges_[last_edge + 1];
             e1.twin(e2);
@@ -3297,12 +4769,12 @@ DEALINGS IN THE SOFTWARE.
           last_edge += 2;
         }
       }
-      this.edges_.splice(last_edge, this.edges_.length - last_edge - 1);
+      this.edges_.splice(last_edge, this.edges_.length - last_edge);
 
       /*// Set up incident edge pointers for cells and vertices. */
-      ref6 = this.edges_;
-      for (m = 0, len = ref6.length; m < len; m++) {
-        edge = ref6[m];
+      ref7 = this.edges_;
+      for (m = 0, len = ref7.length; m < len; m++) {
+        edge = ref7[m];
         edge.cell().incident_edge(edge);
         if (edge.vertex0() != null) {
           edge.vertex0().incident_edge(edge);
@@ -3312,7 +4784,7 @@ DEALINGS IN THE SOFTWARE.
       /*// Remove degenerate vertices. */
       last_vertex = 0;
       if (this.vertices_.length > 0) {
-        for (it = n = 0, ref7 = this.vertices_.length - 1; 0 <= ref7 ? n < ref7 : n > ref7; it = 0 <= ref7 ? ++n : --n) {
+        for (it = n = 0, ref8 = this.vertices_.length - 1; 0 <= ref8 ? n < ref8 : n > ref8; it = 0 <= ref8 ? ++n : --n) {
           if (this.vertices_[it].incident_edge() != null) {
             if (it !== last_vertex) {
               this.vertices_[last_vertex] = this.vertices_[it];
@@ -3359,10 +4831,10 @@ DEALINGS IN THE SOFTWARE.
         } else {
 
           /*// Update prev/next pointers for the ray edges. */
-          ref8 = this.cells_;
+          ref9 = this.cells_;
           results = [];
-          for (o = 0, len1 = ref8.length; o < len1; o++) {
-            cell = ref8[o];
+          for (o = 0, len1 = ref9.length; o < len1; o++) {
+            cell = ref9[o];
             if (cell.is_degenerate()) {
               continue;
             }
@@ -3451,11 +4923,11 @@ DEALINGS IN THE SOFTWARE.
     };
   }
 
-  if (typeof require !== "undefined" && require !== null) {
-    ref5 = require('./constants'), SOURCE_CATEGORY_SINGLE_POINT = ref5.SOURCE_CATEGORY_SINGLE_POINT, SOURCE_CATEGORY_SEGMENT_START_POINT = ref5.SOURCE_CATEGORY_SEGMENT_START_POINT, SOURCE_CATEGORY_SEGMENT_END_POINT = ref5.SOURCE_CATEGORY_SEGMENT_END_POINT, SOURCE_CATEGORY_REVERSE_SEGMENT = ref5.SOURCE_CATEGORY_REVERSE_SEGMENT, SOURCE_CATEGORY_INITIAL_SEGMENT = ref5.SOURCE_CATEGORY_INITIAL_SEGMENT;
-    ref6 = require('./collections'), ordered_queue = ref6.ordered_queue, ordered_map = ref6.ordered_map, list = ref6.list;
-    ref7 = require('./voronoi_predicates'), node_comparison_predicate = ref7.node_comparison_predicate, point_comparison_predicate = ref7.point_comparison_predicate, event_comparison_predicate = ref7.event_comparison_predicate, circle_formation_predicate = ref7.circle_formation_predicate, is_vertical = ref7.is_vertical;
-    ref8 = require('./voronoi_structures'), site_event = ref8.site_event, circle_event = ref8.circle_event, point_2d = ref8.point_2d, beach_line_node_key = ref8.beach_line_node_key, beach_line_node_data = ref8.beach_line_node_data;
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
+    ref6 = require('./constants'), SOURCE_CATEGORY_SINGLE_POINT = ref6.SOURCE_CATEGORY_SINGLE_POINT, SOURCE_CATEGORY_SEGMENT_START_POINT = ref6.SOURCE_CATEGORY_SEGMENT_START_POINT, SOURCE_CATEGORY_SEGMENT_END_POINT = ref6.SOURCE_CATEGORY_SEGMENT_END_POINT, SOURCE_CATEGORY_REVERSE_SEGMENT = ref6.SOURCE_CATEGORY_REVERSE_SEGMENT, SOURCE_CATEGORY_INITIAL_SEGMENT = ref6.SOURCE_CATEGORY_INITIAL_SEGMENT;
+    ref7 = require('./collections'), ordered_queue = ref7.ordered_queue, ordered_map = ref7.ordered_map, list = ref7.list;
+    ref8 = require('./voronoi_predicates'), node_comparison_predicate = ref8.node_comparison_predicate, point_comparison_predicate = ref8.point_comparison_predicate, event_comparison_predicate = ref8.event_comparison_predicate, circle_formation_predicate = ref8.circle_formation_predicate, is_vertical = ref8.is_vertical;
+    ref9 = require('./voronoi_structures'), site_event = ref9.site_event, circle_event = ref9.circle_event, point_2d = ref9.point_2d, beach_line_node_key = ref9.beach_line_node_key, beach_line_node_data = ref9.beach_line_node_data;
   }
 
 
@@ -3650,12 +5122,35 @@ DEALINGS IN THE SOFTWARE.
       return events;
     };
 
-    voronoi_builder.prototype.generate_iteration_json_node = function(description) {
+    voronoi_builder.prototype.output_to_json = function(output) {
+      var e, edges, l, len, len1, m, ref10, ref11, v, vertices;
+      edges = [];
+      vertices = [];
+      ref10 = output.edges_;
+      for (l = 0, len = ref10.length; l < len; l++) {
+        e = ref10[l];
+        edges.push(e.to_json());
+      }
+      ref11 = output.vertices_;
+      for (m = 0, len1 = ref11.length; m < len1; m++) {
+        v = ref11[m];
+        vertices.push(v.to_json());
+      }
+      return {
+        edges: edges,
+        vertices: vertices,
+        cells: "TODO"
+      };
+    };
+
+    voronoi_builder.prototype.generate_iteration_json_node = function(description, output) {
       return {
         iteration: description,
         beachline: this.beachline_to_json(),
         site_events: this.site_events_to_json(),
-        circle_events: this.circle_events_.to_json()
+        circle_events: this.circle_events_.to_json(),
+        end_points: this.end_points_.to_json(),
+        diagram: this.output_to_json(output)
       };
     };
 
@@ -3669,11 +5164,11 @@ DEALINGS IN THE SOFTWARE.
       output._reserve(this.site_events_.size());
       this.init_sites_queue();
       if (interim_json_node != null) {
-        interim_json_node.push(this.generate_iteration_json_node("AFTER init_sites_queue"));
+        interim_json_node.push(this.generate_iteration_json_node("AFTER init_sites_queue", output));
       }
       this.init_beach_line(output);
       if (interim_json_node != null) {
-        interim_json_node.push(this.generate_iteration_json_node("AFTER init_beach_line"));
+        interim_json_node.push(this.generate_iteration_json_node("AFTER init_beach_line", output));
       }
 
       /* // The algorithm stops when there are no events to process. */
@@ -3683,30 +5178,30 @@ DEALINGS IN THE SOFTWARE.
         if (this.circle_events_.empty()) {
           this.process_site_event(output);
           if (interim_json_node != null) {
-            interim_json_node.push(this.generate_iteration_json_node("AFTER top process_site_event ITERATION: " + iteration));
+            interim_json_node.push(this.generate_iteration_json_node("AFTER top process_site_event ITERATION: " + iteration, output));
           }
         } else if (this.site_event_iterator_ === this.site_events_.end()) {
           this.process_circle_event(output);
           if (interim_json_node != null) {
-            interim_json_node.push(this.generate_iteration_json_node("AFTER top process_circle_event ITERATION: " + iteration));
+            interim_json_node.push(this.generate_iteration_json_node("AFTER top process_circle_event ITERATION: " + iteration, output));
           }
         } else {
           if (event_comparison_predicate(this.site_event_iterator_.value(), this.circle_events_.top().first)) {
             this.process_site_event(output);
             if (interim_json_node != null) {
-              interim_json_node.push(this.generate_iteration_json_node("AFTER bottom process_site_event ITERATION: " + iteration));
+              interim_json_node.push(this.generate_iteration_json_node("AFTER bottom process_site_event ITERATION: " + iteration, output));
             }
           } else {
             this.process_circle_event(output);
             if (interim_json_node != null) {
-              interim_json_node.push(this.generate_iteration_json_node("AFTER bottom process_circle_event ITERATION: " + iteration));
+              interim_json_node.push(this.generate_iteration_json_node("AFTER bottom process_circle_event ITERATION: " + iteration, output));
             }
           }
         }
         while ((!this.circle_events_.empty()) && (!this.circle_events_.top().first.is_active())) {
           this.circle_events_.pop();
           if (interim_json_node != null) {
-            interim_json_node.push(this.generate_iteration_json_node("AFTER circle_events_.pop() ITERATION: " + iteration));
+            interim_json_node.push(this.generate_iteration_json_node("AFTER circle_events_.pop() ITERATION: " + iteration, output));
           }
         }
       }
@@ -3724,16 +5219,18 @@ DEALINGS IN THE SOFTWARE.
     voronoi_builder.prototype.init_sites_queue = function() {
 
       /*     // Sort site events. */
-      var cur, l, ref9;
+      var cur, l, ref10;
       this.site_events_.jsSort(event_comparison_predicate);
 
       /*     // Remove duplicates. */
 
       /* TODO: http://stackoverflow.com/questions/9229645/remove-duplicates-from-javascript-array */
-      this.site_events_ = this.site_events_.unique(function(a, b) {
+      this.site_events_ = this.site_events_.uniqueWithTieBreaker(function(a, b) {
         return a.equals(b);
+      }, function(a, b) {
+        return a.initial_index_ - b.initial_index_;
       });
-      for (cur = l = 0, ref9 = this.site_events_.size(); 0 <= ref9 ? l < ref9 : l > ref9; cur = 0 <= ref9 ? ++l : --l) {
+      for (cur = l = 0, ref10 = this.site_events_.size(); 0 <= ref10 ? l < ref10 : l > ref10; cur = 0 <= ref10 ? ++l : --l) {
         this.site_events_.at(cur).value().sorted_index(cur);
       }
       this.site_event_iterator_ = this.site_events_.begin();
@@ -3821,7 +5318,7 @@ DEALINGS IN THE SOFTWARE.
 
       /* // Get next site event to process. */
       var b_it, last, left_it, new_key, new_node_it, right_it, site1, site3, site_arc, site_arc1, site_arc2, site_event_;
-      site_event_ = this.site_event_iterator_.value();
+      site_event_ = new site_event(this.site_event_iterator_.value());
 
       /* // Move site iterator. */
       last = this.site_event_iterator_.next();
@@ -3847,7 +5344,7 @@ DEALINGS IN THE SOFTWARE.
       new_key = new beach_line_node_key(this.site_event_iterator_.value());
       right_it = this.beach_line_.lowerBound(new_key);
       while (this.site_event_iterator_ !== last) {
-        site_event_ = this.site_event_iterator_.value();
+        site_event_ = new site_event(this.site_event_iterator_.value());
         left_it = right_it;
 
         /* // Do further processing depending on the above node position.
@@ -4234,7 +5731,7 @@ DEALINGS IN THE SOFTWARE.
     };
   }
 
-  if (typeof require !== "undefined" && require !== null) {
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
     voronoi_builder = require('./voronoi_builder').voronoi_builder;
     point_data = require('./point_data').point_data;
     segment_data = require('./segment_data').segment_data;
@@ -4293,7 +5790,7 @@ DEALINGS IN THE SOFTWARE.
     };
   }
 
-  if (typeof require !== "undefined" && require !== null) {
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
     static_cast_int = require('./voronoi_predicates').static_cast_int;
   }
 
@@ -4724,9 +6221,9 @@ DEALINGS IN THE SOFTWARE.
     };
 
     cppgen.prototype.input_data = function(path) {
-      var i, l, pt1, pt2, ref9, src;
+      var i, l, pt1, pt2, ref10, src;
       src = "";
-      for (i = l = 0, ref9 = path.length - 1; 0 <= ref9 ? l < ref9 : l > ref9; i = 0 <= ref9 ? ++l : --l) {
+      for (i = l = 0, ref10 = path.length - 1; 0 <= ref10 ? l < ref10 : l > ref10; i = 0 <= ref10 ? ++l : --l) {
         pt1 = path[i];
         pt2 = path[i + 1];
         src += "addTwoPoints(" + (Math.round(pt1.x)) + ", " + (Math.round(pt1.y)) + ", " + (Math.round(pt2.x)) + ", " + (Math.round(pt2.y)) + ", points, segments);\n";
@@ -4768,8 +6265,8 @@ DEALINGS IN THE SOFTWARE.
    @returns an array of segments [{point0: {x, y, radius}, point1: {x, y, radius}}, {point0: {x, y, radius}, point1: {x, y, radius}}]
    */
 
-  if (typeof require !== "undefined" && require !== null) {
-    ref9 = require('./constants'), EPSILON = ref9.EPSILON, SOURCE_CATEGORY_SINGLE_POINT = ref9.SOURCE_CATEGORY_SINGLE_POINT;
+  if ((DISABLE_REQUIRE == null) && (typeof require !== "undefined" && require !== null)) {
+    ref10 = require('./constants'), EPSILON = ref10.EPSILON, SOURCE_CATEGORY_SINGLE_POINT = ref10.SOURCE_CATEGORY_SINGLE_POINT;
     cppgen = require('./cppgen');
     point_data = require('./point_data').point_data;
     segment_data = require('./segment_data').segment_data;
@@ -4818,7 +6315,7 @@ DEALINGS IN THE SOFTWARE.
       return this.equals(pt1.x, pt2.x) && this.equals(pt1.y, pt2.y);
     },
     generate_points_and_segments: function(boundary, is_hole) {
-      var i, l, p1, p2, points, pt1, pt2, ref10, seg, segments;
+      var currentPt, firstPt, i, l, points, pvsPt, ref11, seg, segments;
       points = [];
       segments = [];
       if (boundary.length === 0) {
@@ -4827,27 +6324,19 @@ DEALINGS IN THE SOFTWARE.
           segments: segments
         };
       }
-      for (i = l = 0, ref10 = boundary.length - 1; 0 <= ref10 ? l < ref10 : l > ref10; i = 0 <= ref10 ? ++l : --l) {
-        pt1 = boundary[i];
-        pt2 = boundary[i + 1];
-        p1 = new point_data(pt1.x, pt1.y);
-        p2 = new point_data(pt2.x, pt2.y);
-        p1.is_hole = is_hole;
-        p2.is_hole = is_hole;
-        points.push(p1);
-        seg = new segment_data(p1, p2);
+      pvsPt = new point_data(boundary[0].x, boundary[0].y);
+      firstPt = pvsPt;
+      firstPt.is_hole = is_hole;
+      for (i = l = 1, ref11 = boundary.length; 1 <= ref11 ? l < ref11 : l > ref11; i = 1 <= ref11 ? ++l : --l) {
+        currentPt = new point_data(boundary[i].x, boundary[i].y);
+        currentPt.is_hole = is_hole;
+        seg = new segment_data(pvsPt, currentPt);
         seg.is_hole = is_hole;
         segments.push(seg);
+        pvsPt = currentPt;
       }
       if (!this.equal_points(boundary[0], boundary[boundary.length - 1])) {
-        pt1 = boundary[boundary.length - 1];
-        pt2 = boundary[0];
-        p1 = new point_data(pt1.x, pt1.y);
-        p2 = new point_data(pt2.x, pt2.y);
-        p1.is_hole = is_hole;
-        p2.is_hole = is_hole;
-        points.push(p1);
-        seg = new segment_data(p1, p2);
+        seg = new segment_data(pvsPt, firstPt);
         seg.is_hole = is_hole;
         segments.push(seg);
       }
@@ -4876,29 +6365,29 @@ DEALINGS IN THE SOFTWARE.
       return vd;
     },
     construct_voronoi_diagram: function(boundary, holes, intermediate_debug_data) {
-      var ref10;
+      var ref11;
       if (intermediate_debug_data == null) {
         intermediate_debug_data = null;
       }
-      ref10 = this.round_input_data(boundary, holes), boundary = ref10.boundary, holes = ref10.holes;
+      ref11 = this.round_input_data(boundary, holes), boundary = ref11.boundary, holes = ref11.holes;
       return this.construct_voronoi_diagram_for_rounded_data(boundary, holes, intermediate_debug_data);
     },
     construct_voronoi_diagram_with_edge_classification: function(boundary, holes, intermediate_debug_data) {
-      var ref10, vd;
+      var ref11, vd;
       if (intermediate_debug_data == null) {
         intermediate_debug_data = null;
       }
-      ref10 = this.round_input_data(boundary, holes), boundary = ref10.boundary, holes = ref10.holes;
+      ref11 = this.round_input_data(boundary, holes), boundary = ref11.boundary, holes = ref11.holes;
       vd = this.construct_voronoi_diagram_for_rounded_data(boundary, holes);
       this.classify_edges(vd, boundary, holes, intermediate_debug_data);
       return vd;
     },
     create_edge_json_data_for_testing: function(vd) {
-      var e, edge, edges, l, len, pt, ref10;
+      var e, edge, edges, l, len, pt, ref11;
       edges = [];
-      ref10 = vd.edges();
-      for (l = 0, len = ref10.length; l < len; l++) {
-        edge = ref10[l];
+      ref11 = vd.edges();
+      for (l = 0, len = ref11.length; l < len; l++) {
+        edge = ref11[l];
         e = {};
         e.is_finite = edge.is_finite();
         e.is_infinite = edge.is_infinite();
@@ -4981,7 +6470,7 @@ DEALINGS IN THE SOFTWARE.
       return Math.abs((y2 - y1) * pt.x - (x2 - x1) * pt.y + x2 * y1 - y2 * x1) / Math.hypot(y1 - y2, x1 - x2);
     },
     create_output_segments: function(edge, vd, output_segments, no_parabola, show_sites, discretize_threshold, discretize_method, pointpoint_segmentation_threshold) {
-      var i, l, len, len1, m, n, point, point2, pt, pvsPt, ref10, sample, samples, segment, segment2;
+      var i, l, len, len1, m, n, point, point2, pt, pvsPt, ref11, sample, samples, segment, segment2;
       if (discretize_threshold == null) {
         discretize_threshold = 1e-1;
       }
@@ -5111,7 +6600,7 @@ DEALINGS IN THE SOFTWARE.
         }
       }
       pvsPt = samples[0];
-      for (i = n = 1, ref10 = samples.length; 1 <= ref10 ? n < ref10 : n > ref10; i = 1 <= ref10 ? ++n : --n) {
+      for (i = n = 1, ref11 = samples.length; 1 <= ref11 ? n < ref11 : n > ref11; i = 1 <= ref11 ? ++n : --n) {
         pt = samples[i];
         output_segments.push({
           point0: {
@@ -5208,7 +6697,7 @@ DEALINGS IN THE SOFTWARE.
       return pt1;
     },
     classify_edges: function(vd, boundary, holes, diagnostics, count, cb) {
-      var edge, l, len, len1, len2, len3, m, n, o, origin, poly, polygon, polygons, pt, ref10, unclassifiedPrimaryEdges;
+      var edge, l, len, len1, len2, len3, m, n, o, origin, poly, polygon, polygons, pt, ref11, unclassifiedPrimaryEdges;
       if (diagnostics == null) {
         diagnostics = new voronoi_diagnostics([], []);
       }
@@ -5219,9 +6708,9 @@ DEALINGS IN THE SOFTWARE.
         cb = function() {};
       }
       unclassifiedPrimaryEdges = [];
-      ref10 = vd.edges();
-      for (l = 0, len = ref10.length; l < len; l++) {
-        edge = ref10[l];
+      ref11 = vd.edges();
+      for (l = 0, len = ref11.length; l < len; l++) {
+        edge = ref11[l];
         if (edge.is_primary()) {
           if (edge.is_infinite()) {
             edge.color(this.colors.outer_primary);
@@ -5293,8 +6782,8 @@ DEALINGS IN THE SOFTWARE.
         })
       };
     },
-    construct_medial_axis: function(boundary, holes, descritize_threshold, descritize_method, filtering_angle, pointpoint_segmentation_threshold, debug_flags) {
-      var currEdge, diagnostics, edge, edgeSet, edges, entriesIterator, entry, filtered_edges, first_edge, invalid_output, l, len, len1, m, no_parabola, original_e, output_edge, output_edges, output_segments, prev_edge, ref10, show_sites, valid, vd;
+    construct_medial_axis: function(boundary, holes, descritize_threshold, descritize_method, filtering_angle, pointpoint_segmentation_threshold, debug_flags, intermediate_debug_data) {
+      var currEdge, diagnostics, edge, edgeSet, edges, entriesIterator, entry, filtered_edges, first_edge, invalid_output, l, len, len1, m, no_parabola, original_e, output_edge, output_edges, output_segments, prev_edge, ref11, show_sites, valid, vd;
       if (descritize_threshold == null) {
         descritize_threshold = 1e-1;
       }
@@ -5313,10 +6802,13 @@ DEALINGS IN THE SOFTWARE.
           show_sites: false
         };
       }
+      if (intermediate_debug_data == null) {
+        intermediate_debug_data = null;
+      }
       diagnostics = new voronoi_diagnostics(boundary, holes, filtering_angle, debug_flags);
       no_parabola = debug_flags.no_parabola, show_sites = debug_flags.show_sites;
-      ref10 = this.round_input_data(boundary, holes), boundary = ref10.boundary, holes = ref10.holes;
-      vd = this.construct_voronoi_diagram_for_rounded_data(boundary, holes);
+      ref11 = this.round_input_data(boundary, holes), boundary = ref11.boundary, holes = ref11.holes;
+      vd = this.construct_voronoi_diagram_for_rounded_data(boundary, holes, intermediate_debug_data);
       edges = this.classify_edges(vd, boundary, holes, diagnostics).filter(function(edge) {
         return edge.color() === JSPoly.colors.inner_primary;
       });
