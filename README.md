@@ -1,6 +1,5 @@
 # JSPoly
-
-JSPoly is a Javascript translation of the Boost Polygon Library originally written in C++. 
+JSPoly is a Javascript translation of the Boost Polygon Library originally written in C++. It can be used to generate the vornoi diagram and medial axis transform of a polygon with holes. 
 
 License : Boost Software License - Version 1.0
 
