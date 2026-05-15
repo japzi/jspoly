@@ -5,7 +5,7 @@ JSPoly is a Javascript translation of the Boost Polygon Library originally writt
 
 License : Boost Software License - Version 1.0
 
-![screen shot 2017-06-07 at 10 34 03 pm](https://user-images.githubusercontent.com/5238776/26909838-7f1d6caa-4bd1-11e7-80b9-c278c0f9e7ab.png)
+![Medial axis of the word JSPoly rendered by the interactive demo](https://github.com/user-attachments/assets/914c2c87-ed47-4cdb-9d70-e3081e64c050)
 
 
 ## Sample code
