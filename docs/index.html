@@ -186,7 +186,7 @@
   </section>
 </main>
 
-<script src="https://cdn.jsdelivr.net/gh/japzi/jspoly@master/jspoly.min.js"></script>
+<script src="./jspoly.min.js"></script>
 <script>
 (function () {
   const canvas = document.getElementById('cv');
@@ -555,7 +555,7 @@
   function init() {
     if (typeof JSPoly === 'undefined') {
       statusEl.classList.add('err');
-      statusEl.textContent = 'Failed to load JSPoly library from CDN.';
+      statusEl.textContent = 'Failed to load JSPoly library.';
       return;
     }
     fitCanvas();
