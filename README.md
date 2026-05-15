@@ -1,6 +1,8 @@
 # JSPoly
 JSPoly is a Javascript translation of the Boost Polygon Library originally written in C++. It can be used to generate the vornoi diagram and medial axis transform of a polygon with holes. 
 
+**[Try the interactive demo](https://japzi.github.io/jspoly/)** — draw a polygon with holes and see the medial axis update live.
+
 License : Boost Software License - Version 1.0
 
 ![screen shot 2017-06-07 at 10 34 03 pm](https://user-images.githubusercontent.com/5238776/26909838-7f1d6caa-4bd1-11e7-80b9-c278c0f9e7ab.png)

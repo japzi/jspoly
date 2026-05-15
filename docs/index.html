@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>JSPoly — interactive medial axis demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --ink: #e6e9ef;
+    --muted: #8a93a6;
+    --accent: #5aa9ff;
+    --accent2: #ffb454;
+    --boundary: #7dd3fc;
+    --hole: #fca5a5;
+    --axis: #fbbf24;
+    --vertex: #ffffff;
+    --vertex-active: #5aa9ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    min-height: 100vh;
+  }
+  header {
+    padding: 18px 24px 8px;
+    border-bottom: 1px solid #232838;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  header a { color: var(--accent); text-decoration: none; }
+  main {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 16px;
+    padding: 16px 24px 24px;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  aside {
+    background: var(--panel);
+    border: 1px solid #232838;
+    border-radius: 8px;
+    padding: 14px;
+    height: fit-content;
+  }
+  aside h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    margin: 14px 0 8px;
+    font-weight: 600;
+  }
+  aside h2:first-child { margin-top: 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  button {
+    background: #222837;
+    color: var(--ink);
+    border: 1px solid #2e3547;
+    border-radius: 6px;
+    padding: 7px 11px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  button:hover { background: #2a3146; }
+  button.primary { background: #1f4f8a; border-color: #2c64aa; }
+  button.primary:hover { background: #265fa6; }
+  button.active { background: #1f4f8a; border-color: var(--accent); }
+  button.danger:hover { background: #5a2027; border-color: #8a3540; }
+  .legend {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+  .legend .sw {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border-radius: 2px;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  .help {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+  .help kbd {
+    background: #232838;
+    border: 1px solid #2e3547;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 11px;
+    color: var(--ink);
+  }
+  .canvas-wrap {
+    background: var(--panel);
+    border: 1px solid #232838;
+    border-radius: 8px;
+    padding: 8px;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 4px;
+    background: #0a0c12;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .status {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 8px 4px 0;
+    min-height: 18px;
+  }
+  .status.err { color: #fca5a5; }
+  label.check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--ink);
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>JSPoly — interactive medial axis demo</h1>
+  <p>Click to draw a polygon with holes; see the medial axis computed live. Source: <a href="https://github.com/japzi/jspoly">github.com/japzi/jspoly</a></p>
+</header>
+<main>
+  <aside>
+    <h2>Mode</h2>
+    <div class="row">
+      <button id="mode-boundary" class="primary active">Boundary</button>
+      <button id="mode-hole">Hole</button>
+    </div>
+    <div class="help">
+      Click empty space to add a vertex. Hold <kbd>Shift</kbd> while clicking to toggle Hole mode for that click. Drag a vertex to move it. Right-click a vertex to delete it.
+    </div>
+
+    <h2>Holes</h2>
+    <div class="row">
+      <button id="hole-new">+ New hole</button>
+      <button id="hole-prev">&larr;</button>
+      <button id="hole-next">&rarr;</button>
+    </div>
+    <div class="help" id="hole-status">No holes yet.</div>
+
+    <h2>Presets</h2>
+    <div class="row">
+      <button data-preset="trapezoid">Trapezoid</button>
+      <button data-preset="l-shape">L with hole</button>
+      <button data-preset="rect-holes">Rect + 2 holes</button>
+    </div>
+
+    <h2>View</h2>
+    <label class="check"><input type="checkbox" id="show-radius"> Show inscribed circles</label>
+    <label class="check"><input type="checkbox" id="show-vertices" checked> Show vertices</label>
+
+    <h2>Reset</h2>
+    <div class="row">
+      <button id="clear" class="danger">Clear all</button>
+    </div>
+
+    <h2>Legend</h2>
+    <div class="legend">
+      <div><span class="sw" style="background: var(--boundary)"></span>Boundary</div>
+      <div><span class="sw" style="background: var(--hole)"></span>Hole</div>
+      <div><span class="sw" style="background: var(--axis)"></span>Medial axis</div>
+    </div>
+  </aside>
+  <section>
+    <div class="canvas-wrap">
+      <canvas id="cv" width="900" height="600"></canvas>
+    </div>
+    <div class="status" id="status">Ready. Click to start drawing the boundary.</div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/gh/japzi/jspoly@master/jspoly.min.js"></script>
+<script>
+(function () {
+  const canvas = document.getElementById('cv');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const holeStatus = document.getElementById('hole-status');
+
+  // Hi-DPI rendering
+  function fitCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  const state = {
+    boundary: [],
+    holes: [],
+    activeHole: -1,         // -1 means drawing boundary
+    drag: null,             // { kind: 'boundary'|'hole', holeIdx, ptIdx }
+    showRadius: false,
+    showVertices: true,
+  };
+
+  const presets = {
+    trapezoid: {
+      boundary: [
+        { x: 150, y: 450 }, { x: 750, y: 450 },
+        { x: 620, y: 130 }, { x: 280, y: 130 },
+      ],
+      holes: [],
+    },
+    'l-shape': {
+      boundary: [
+        { x: 120, y: 480 }, { x: 780, y: 480 },
+        { x: 780, y: 280 }, { x: 460, y: 280 },
+        { x: 460, y: 110 }, { x: 120, y: 110 },
+      ],
+      holes: [[
+        { x: 230, y: 230 }, { x: 230, y: 380 },
+        { x: 360, y: 380 }, { x: 360, y: 230 },
+      ]],
+    },
+    'rect-holes': {
+      boundary: [
+        { x: 100, y: 110 }, { x: 100, y: 480 },
+        { x: 800, y: 480 }, { x: 800, y: 110 },
+      ],
+      holes: [
+        [{ x: 200, y: 200 }, { x: 320, y: 200 }, { x: 320, y: 380 }, { x: 200, y: 380 }],
+        [{ x: 500, y: 220 }, { x: 700, y: 220 }, { x: 700, y: 400 }, { x: 500, y: 400 }],
+      ],
+    },
+  };
+
+  function loadPreset(name) {
+    const p = presets[name];
+    if (!p) return;
+    state.boundary = p.boundary.map(pt => ({ ...pt }));
+    state.holes = p.holes.map(h => h.map(pt => ({ ...pt })));
+    state.activeHole = state.holes.length ? 0 : -1;
+    updateModeButtons();
+    updateHoleStatus();
+    draw();
+  }
+
+  // --- canvas coordinate helpers ---
+  function getMousePos(evt) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (evt.clientX - rect.left),
+      y: (evt.clientY - rect.top),
+    };
+  }
+
+  function hitTestVertex(pt) {
+    const R2 = 10 * 10;
+    for (let i = 0; i < state.boundary.length; i++) {
+      const v = state.boundary[i];
+      if ((v.x - pt.x) ** 2 + (v.y - pt.y) ** 2 < R2)
+        return { kind: 'boundary', holeIdx: -1, ptIdx: i };
+    }
+    for (let h = 0; h < state.holes.length; h++) {
+      const hole = state.holes[h];
+      for (let i = 0; i < hole.length; i++) {
+        const v = hole[i];
+        if ((v.x - pt.x) ** 2 + (v.y - pt.y) ** 2 < R2)
+          return { kind: 'hole', holeIdx: h, ptIdx: i };
+      }
+    }
+    return null;
+  }
+
+  // --- input events ---
+  canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const pt = getMousePos(e);
+    const hit = hitTestVertex(pt);
+    if (!hit) return;
+    if (hit.kind === 'boundary') {
+      state.boundary.splice(hit.ptIdx, 1);
+    } else {
+      state.holes[hit.holeIdx].splice(hit.ptIdx, 1);
+      if (state.holes[hit.holeIdx].length === 0) {
+        state.holes.splice(hit.holeIdx, 1);
+        state.activeHole = Math.min(state.activeHole, state.holes.length - 1);
+        updateHoleStatus();
+      }
+    }
+    draw();
+  });
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const pt = getMousePos(e);
+    const hit = hitTestVertex(pt);
+    if (hit) {
+      state.drag = hit;
+      canvas.style.cursor = 'grabbing';
+      return;
+    }
+    // add new vertex
+    const useHole = e.shiftKey ? !inHoleMode() : inHoleMode();
+    if (useHole) {
+      if (state.activeHole < 0 || !state.holes[state.activeHole]) {
+        state.holes.push([]);
+        state.activeHole = state.holes.length - 1;
+      }
+      state.holes[state.activeHole].push({ x: pt.x, y: pt.y });
+    } else {
+      state.boundary.push({ x: pt.x, y: pt.y });
+    }
+    updateHoleStatus();
+    draw();
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    const pt = getMousePos(e);
+    if (state.drag) {
+      const { kind, holeIdx, ptIdx } = state.drag;
+      const arr = kind === 'boundary' ? state.boundary : state.holes[holeIdx];
+      arr[ptIdx].x = pt.x;
+      arr[ptIdx].y = pt.y;
+      draw();
+    } else {
+      canvas.style.cursor = hitTestVertex(pt) ? 'grab' : 'crosshair';
+    }
+  });
+
+  window.addEventListener('mouseup', () => {
+    state.drag = null;
+    canvas.style.cursor = 'crosshair';
+  });
+
+  // --- mode toggle ---
+  const btnBoundary = document.getElementById('mode-boundary');
+  const btnHole = document.getElementById('mode-hole');
+  function inHoleMode() { return state.activeHole >= 0 && btnHole.classList.contains('active'); }
+  function updateModeButtons() {
+    const hole = state.activeHole >= 0;
+    btnHole.classList.toggle('active', hole);
+    btnBoundary.classList.toggle('active', !hole);
+    btnHole.classList.toggle('primary', hole);
+    btnBoundary.classList.toggle('primary', !hole);
+  }
+  btnBoundary.addEventListener('click', () => {
+    state.activeHole = -1;
+    updateModeButtons();
+    updateHoleStatus();
+  });
+  btnHole.addEventListener('click', () => {
+    if (state.holes.length === 0) {
+      state.holes.push([]);
+    }
+    if (state.activeHole < 0) state.activeHole = state.holes.length - 1;
+    updateModeButtons();
+    updateHoleStatus();
+  });
+
+  document.getElementById('hole-new').addEventListener('click', () => {
+    state.holes.push([]);
+    state.activeHole = state.holes.length - 1;
+    updateModeButtons();
+    updateHoleStatus();
+  });
+  document.getElementById('hole-prev').addEventListener('click', () => {
+    if (state.holes.length === 0) return;
+    state.activeHole = state.activeHole <= 0 ? state.holes.length - 1 : state.activeHole - 1;
+    updateModeButtons();
+    updateHoleStatus();
+  });
+  document.getElementById('hole-next').addEventListener('click', () => {
+    if (state.holes.length === 0) return;
+    state.activeHole = (state.activeHole + 1) % state.holes.length;
+    updateModeButtons();
+    updateHoleStatus();
+  });
+
+  function updateHoleStatus() {
+    if (state.holes.length === 0) {
+      holeStatus.textContent = 'No holes yet. Click + New hole or switch to Hole mode and click in the canvas.';
+    } else {
+      holeStatus.textContent =
+        `Hole ${state.activeHole + 1} of ${state.holes.length} (${(state.holes[state.activeHole] || []).length} vertices)`;
+    }
+  }
+
+  document.querySelectorAll('[data-preset]').forEach((b) => {
+    b.addEventListener('click', () => loadPreset(b.dataset.preset));
+  });
+
+  document.getElementById('clear').addEventListener('click', () => {
+    state.boundary = [];
+    state.holes = [];
+    state.activeHole = -1;
+    updateModeButtons();
+    updateHoleStatus();
+    draw();
+  });
+
+  document.getElementById('show-radius').addEventListener('change', (e) => {
+    state.showRadius = e.target.checked;
+    draw();
+  });
+  document.getElementById('show-vertices').addEventListener('change', (e) => {
+    state.showVertices = e.target.checked;
+    draw();
+  });
+
+  // --- polygon orientation ---
+  function signedArea(poly) {
+    let a = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const j = (i + 1) % poly.length;
+      a += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
+    }
+    return a / 2;
+  }
+  // JSPoly/Boost.Polygon expects boundary CCW and holes CW. In screen coords (y down)
+  // the visual CCW corresponds to a negative signed area. We orient accordingly.
+  function orient(poly, wantNegativeArea) {
+    if (poly.length < 3) return poly;
+    const a = signedArea(poly);
+    if ((a < 0) !== wantNegativeArea) return poly.slice().reverse();
+    return poly;
+  }
+
+  // --- medial axis computation ---
+  function computeAxis() {
+    if (state.boundary.length < 3) return { ok: false, msg: 'Draw at least 3 boundary points.' };
+    const boundary = orient(state.boundary, true).map(pt => ({
+      x: Math.round(pt.x), y: Math.round(pt.y),
+    }));
+    const holes = state.holes
+      .filter(h => h.length >= 3)
+      .map(h => orient(h, false).map(pt => ({ x: Math.round(pt.x), y: Math.round(pt.y) })));
+    try {
+      const segs = JSPoly.construct_medial_axis(boundary, holes);
+      return { ok: true, segs };
+    } catch (err) {
+      return { ok: false, msg: 'Could not compute medial axis: ' + err.message };
+    }
+  }
+
+  // --- drawing ---
+  function drawPolygon(poly, stroke, fill, closed) {
+    if (poly.length === 0) return;
+    ctx.beginPath();
+    ctx.moveTo(poly[0].x, poly[0].y);
+    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+    if (closed && poly.length >= 3) ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill('evenodd'); }
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  function drawVertices(poly, color, isActive) {
+    if (!state.showVertices) return;
+    for (let i = 0; i < poly.length; i++) {
+      const v = poly[i];
+      ctx.beginPath();
+      ctx.arc(v.x, v.y, isActive ? 5 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = '#0a0c12';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  function draw() {
+    const w = canvas.width / (window.devicePixelRatio || 1);
+    const h = canvas.height / (window.devicePixelRatio || 1);
+    ctx.clearRect(0, 0, w, h);
+
+    // shaded interior using even-odd fill: boundary + holes as subpaths
+    if (state.boundary.length >= 3) {
+      ctx.beginPath();
+      const b = state.boundary;
+      ctx.moveTo(b[0].x, b[0].y);
+      for (let i = 1; i < b.length; i++) ctx.lineTo(b[i].x, b[i].y);
+      ctx.closePath();
+      for (const hole of state.holes) {
+        if (hole.length < 3) continue;
+        ctx.moveTo(hole[0].x, hole[0].y);
+        for (let i = 1; i < hole.length; i++) ctx.lineTo(hole[i].x, hole[i].y);
+        ctx.closePath();
+      }
+      ctx.fillStyle = 'rgba(125, 211, 252, 0.08)';
+      ctx.fill('evenodd');
+    }
+
+    drawPolygon(state.boundary, 'rgba(125, 211, 252, 0.9)', null, state.boundary.length >= 3);
+    state.holes.forEach((h, idx) => {
+      const isActive = idx === state.activeHole;
+      drawPolygon(h, isActive ? 'rgba(252, 165, 165, 1)' : 'rgba(252, 165, 165, 0.7)', null, h.length >= 3);
+    });
+
+    // medial axis
+    const result = computeAxis();
+    if (result.ok && result.segs && result.segs.length) {
+      if (state.showRadius) {
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.06)';
+        ctx.strokeStyle = 'rgba(251, 191, 36, 0.18)';
+        ctx.lineWidth = 0.5;
+        for (const s of result.segs) {
+          for (const p of [s.point0, s.point1]) {
+            if (p.radius > 1) {
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            }
+          }
+        }
+      }
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.95)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (const s of result.segs) {
+        ctx.moveTo(s.point0.x, s.point0.y);
+        ctx.lineTo(s.point1.x, s.point1.y);
+      }
+      ctx.stroke();
+      statusEl.classList.remove('err');
+      statusEl.textContent = `Medial axis: ${result.segs.length} segment${result.segs.length === 1 ? '' : 's'}.`;
+    } else if (!result.ok) {
+      statusEl.classList.toggle('err', state.boundary.length >= 3);
+      statusEl.textContent = result.msg;
+    } else {
+      statusEl.classList.remove('err');
+      statusEl.textContent = 'No medial axis segments produced.';
+    }
+
+    drawVertices(state.boundary, '#ffffff', state.activeHole < 0);
+    state.holes.forEach((h, idx) =>
+      drawVertices(h, idx === state.activeHole ? '#fca5a5' : '#9b6868', idx === state.activeHole));
+  }
+
+  // --- bootstrap ---
+  function init() {
+    if (typeof JSPoly === 'undefined') {
+      statusEl.classList.add('err');
+      statusEl.textContent = 'Failed to load JSPoly library from CDN.';
+      return;
+    }
+    fitCanvas();
+    window.addEventListener('resize', fitCanvas);
+    loadPreset('l-shape');
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>
