@@ -185,7 +185,9 @@
   </section>
 </main>
 
-<script src="https://cdn.jsdelivr.net/gh/japzi/jspoly@master/jspoly.min.js"></script>
+<!-- Note: using the unminified build because jspoly.min.js currently drops the
+     top-level bnBigInteger declaration during minification and throws in the browser. -->
+<script src="https://cdn.jsdelivr.net/gh/japzi/jspoly@master/jspoly.js"></script>
 <script>
 (function () {
   const canvas = document.getElementById('cv');
